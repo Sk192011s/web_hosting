@@ -10,7 +10,7 @@ const kv = await Deno.openKv();
 // =======================
 // 1. CONFIG (ပြင်ဆင်ရန်)
 // =======================
-const ADMIN_USERNAME = "admin"; // <--- ဒီနေရာမှာ အစ်ကို့ Username ထည့်ပါ
+const ADMIN_USERNAME = "soekyawwin"; // <--- ဒီနေရာမှာ အစ်ကို့ Username ထည့်ပါ
 const SECRET_KEY = Deno.env.get("SECRET_SALT") || "my-super-secret-salt-key-2024";
 
 // Storage Quota
