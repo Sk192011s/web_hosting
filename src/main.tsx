@@ -11,13 +11,13 @@ const kv = await Deno.openKv();
 // =======================
 // 1. CONFIGURATION
 // =======================
-const ADMIN_USERNAME = "soekyawwin"; 
+const ADMIN_USERNAME = "soekyawwin"; // <--- Admin Username
 const SECRET_KEY = Deno.env.get("SECRET_SALT") || "change-this-secret-key-securely";
-const MAX_REMOTE_SIZE = 1.5 * 1024 * 1024 * 1024; // 1.5 GB for Remote Upload
+const MAX_REMOTE_SIZE = 1.5 * 1024 * 1024 * 1024; // 1.5 GB
 
-// Plan Definitions (Bytes)
+// Plan Definitions
 const PLANS = {
-    free:  { limit: 50 * 1024 * 1024 * 1024, name: "Free Plan" }, // 50GB (But 30 Days Limit)
+    free:  { limit: 50 * 1024 * 1024 * 1024, name: "Free Plan" },
     vip50: { limit: 50 * 1024 * 1024 * 1024, name: "50 GB VIP" },
     vip100:{ limit: 100 * 1024 * 1024 * 1024, name: "100 GB VIP" },
     vip300:{ limit: 300 * 1024 * 1024 * 1024, name: "300 GB VIP" },
@@ -42,7 +42,8 @@ const s3Server2 = new S3Client({
 interface User { 
     username: string; 
     passwordHash: string; 
-    plan: keyof typeof PLANS; // "free", "vip50", etc.
+    plan: keyof typeof PLANS; 
+    isVip: boolean; // Keep for backward compatibility
     vipExpiry?: number; 
     usedStorage: number; 
     createdAt: number; 
@@ -56,7 +57,25 @@ async function hashPassword(password: string) {
     const exported = await crypto.subtle.exportKey("raw", key);
     return Array.from(new Uint8Array(exported)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
-async function getUser(username: string) { const res = await kv.get<User>(["users", username]); return res.value; }
+
+// 🔥 FIXED: GET USER WITH AUTO MIGRATION (Web ဝင်မရတာ ဒါကြောင့်ပါ)
+async function getUser(username: string) { 
+    const res = await kv.get<User>(["users", username]); 
+    if (!res.value) return null;
+
+    const user = res.value;
+    
+    // အကယ်၍ User အဟောင်းဖြစ်နေပြီး Plan မရှိသေးရင် Auto ထည့်ပေးမယ်
+    if (!user.plan || !PLANS[user.plan]) {
+        // အရင်က VIP ဖြစ်ခဲ့ရင် vip50 ပေးမယ်၊ မဟုတ်ရင် free ပေးမယ်
+        user.plan = user.isVip ? 'vip50' : 'free';
+        // Database ကို Update လုပ်မယ်
+        await kv.set(["users", username], user);
+    }
+    
+    return user; 
+}
+
 function isVipActive(user: User): boolean { 
     if (user.plan === 'free') return false;
     return user.vipExpiry ? user.vipExpiry > Date.now() : false; 
@@ -91,7 +110,6 @@ const mainScript = `
         document.getElementById('btn-mode-' + mode).classList.add('bg-yellow-500', 'text-black');
     }
 
-    // SEARCH
     function filterFiles() {
         const input = document.getElementById('searchInput');
         const filter = input.value.toLowerCase();
@@ -102,7 +120,6 @@ const mainScript = `
         }
     }
 
-    // EDIT EXPIRY (VIP)
     function openEditModal(fileId) {
         if (!IS_USER_VIP) { alert("VIP သီးသန့်ဖြစ်သည်"); return; }
         const days = prompt("သက်တမ်းရက်သတ်မှတ်ရန် (0 = သက်တမ်းမဲ့):", "0");
@@ -112,7 +129,6 @@ const mainScript = `
         }
     }
 
-    // UPLOAD LOGIC
     document.addEventListener("DOMContentLoaded", () => {
         const fileInput = document.getElementById('fileInput');
         if(fileInput) {
@@ -261,50 +277,35 @@ app.get("/", async (c) => {
     for await (const res of iter) { if (filterType === 'all' || res.value.type === filterType) { files.push(res.value); } nextCursor = res.cursor; }
 
     const totalGB = (user.usedStorage / 1024 / 1024 / 1024).toFixed(2);
-    const planLimit = PLANS[user.plan]?.limit || PLANS.free.limit;
+    // 🔥 SAFE GUARD FOR UNKNOWN PLAN
+    const currentPlan = PLANS[user.plan] || PLANS.free;
+    const planLimit = currentPlan.limit;
     const displayLimit = (planLimit / 1024 / 1024 / 1024).toFixed(0) + " GB";
     const usedPercent = Math.min(100, (user.usedStorage / planLimit) * 100);
 
-    // Warning Logic: VIP Expired but within 7 days
     const now = Date.now();
     let showWarning = false;
-    if (user.vipExpiry && user.vipExpiry < now) {
-        showWarning = true; // In Grace Period or Expired
-    }
+    if (user.vipExpiry && user.vipExpiry < now) { showWarning = true; }
 
     return c.html(<Layout user={user}>
-        {/* WARNING BANNER */}
         {showWarning && (
             <div class="bg-red-900/50 border border-red-600/50 p-4 rounded-xl mb-6 flex items-start gap-3">
                 <i class="fa-solid fa-triangle-exclamation text-red-500 text-xl mt-1"></i>
-                <div>
-                    <h3 class="font-bold text-red-400 text-sm">သတိပေးချက်: VIP သက်တမ်းကုန်ဆုံးနေပါပြီ</h3>
-                    <p class="text-xs text-gray-300 mt-1">သင်၏ VIP သက်တမ်းကုန်ဆုံးသွားပါပြီ။ ၇-ရက်အတွင်း သက်တမ်းမတိုးပါက ဆာဗာမှ ဖိုင်များကို အလိုအလျောက် ဖျက်သိမ်းမည်ဖြစ်သည်။</p>
-                </div>
+                <div><h3 class="font-bold text-red-400 text-sm">သတိပေးချက်: VIP သက်တမ်းကုန်ဆုံးနေပါပြီ</h3><p class="text-xs text-gray-300 mt-1">၇-ရက်အတွင်း သက်တမ်းမတိုးပါက ဆာဗာမှ ဖိုင်များကို အလိုအလျောက် ဖျက်သိမ်းမည်ဖြစ်သည်။</p></div>
             </div>
         )}
 
-        {/* TOP STATS */}
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
             <div class="glass p-5 rounded-2xl relative overflow-hidden group">
                 <p class="text-xs text-zinc-500 uppercase font-bold mb-1">လက်ရှိအစီအစဉ်</p>
-                <p class={`text-2xl font-black ${isVip ? 'text-yellow-500' : 'text-zinc-300'}`}>{PLANS[user.plan].name}</p>
-                {user.vipExpiry ? (
-                    <p class={`text-[10px] mt-2 font-mono px-2 py-1 rounded inline-block ${user.vipExpiry > now ? 'text-green-400 bg-green-900/20' : 'text-red-400 bg-red-900/20'}`}>
-                        {user.vipExpiry > now ? `သက်တမ်း: ${formatDate(user.vipExpiry)}` : `ကုန်ဆုံး: ${formatDate(user.vipExpiry)}`}
-                    </p>
-                ) : <p class="text-[10px] mt-2 text-zinc-500">Free Version</p>}
+                <p class={`text-2xl font-black ${isVip ? 'text-yellow-500' : 'text-zinc-300'}`}>{currentPlan.name}</p>
+                {user.vipExpiry ? (<p class={`text-[10px] mt-2 font-mono px-2 py-1 rounded inline-block ${user.vipExpiry > now ? 'text-green-400 bg-green-900/20' : 'text-red-400 bg-red-900/20'}`}>{user.vipExpiry > now ? `သက်တမ်း: ${formatDate(user.vipExpiry)}` : `ကုန်ဆုံး: ${formatDate(user.vipExpiry)}`}</p>) : <p class="text-[10px] mt-2 text-zinc-500">Free Version</p>}
                 <a href="/change-password" class="absolute bottom-4 right-4 text-xs text-zinc-500 hover:text-white transition"><i class="fa-solid fa-key mr-1"></i> Pass</a>
             </div>
-            
             <div class="glass p-5 rounded-2xl relative">
-                <div class="flex justify-between items-end mb-2">
-                    <div><p class="text-xs text-zinc-500 uppercase font-bold">သိုလှောင်ခန်း</p><p class="text-xl font-bold text-white">{totalGB} <span class="text-sm text-zinc-500">GB / {displayLimit}</span></p></div>
-                    <span class="text-2xl font-black text-zinc-700">{usedPercent.toFixed(0)}%</span>
-                </div>
+                <div class="flex justify-between items-end mb-2"><div><p class="text-xs text-zinc-500 uppercase font-bold">သိုလှောင်ခန်း</p><p class="text-xl font-bold text-white">{totalGB} <span class="text-sm text-zinc-500">GB / {displayLimit}</span></p></div><span class="text-2xl font-black text-zinc-700">{usedPercent.toFixed(0)}%</span></div>
                 <div class="w-full bg-zinc-800 rounded-full h-3 overflow-hidden"><div class={`h-full rounded-full ${isVip ? 'bg-gradient-to-r from-yellow-600 to-yellow-400' : 'bg-zinc-600'}`} style={`width: ${usedPercent}%`}></div></div>
             </div>
-
             <div class="glass p-5 rounded-2xl flex flex-col justify-center gap-2">
                 <div class="text-xs text-zinc-400 mb-1 font-bold uppercase">VIP အကျိုးခံစားခွင့်</div>
                 <ul class="text-[10px] text-gray-400 space-y-1">
@@ -315,16 +316,11 @@ app.get("/", async (c) => {
             </div>
         </div>
 
-        {/* PRICING PLANS */}
         {!isVip && (
         <div class="mb-10">
             <h2 class="text-white font-bold text-lg mb-4 flex items-center gap-2"><i class="fa-solid fa-crown text-yellow-500"></i> VIP အစီအစဉ်များ</h2>
             <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
-                {[
-                    {gb:"50 GB", p:"3,000", c:"vip50"}, {gb:"100 GB", p:"5,000", c:"vip100"},
-                    {gb:"300 GB", p:"12,000", c:"vip300"}, {gb:"500 GB", p:"22,000", c:"vip500"},
-                    {gb:"1 TB", p:"40,000", c:"vip1t"}
-                ].map(p => (
+                {[{gb:"50 GB", p:"3,000", c:"vip50"}, {gb:"100 GB", p:"5,000", c:"vip100"}, {gb:"300 GB", p:"12,000", c:"vip300"}, {gb:"500 GB", p:"22,000", c:"vip500"}, {gb:"1 TB", p:"40,000", c:"vip1t"}].map(p => (
                     <div class="vip-card p-4 rounded-xl text-center relative overflow-hidden group">
                         <div class="text-yellow-500 font-black text-lg">{p.gb}</div>
                         <div class="text-white text-sm font-bold my-1">{p.p} Ks <span class="text-[10px] text-gray-500">/mo</span></div>
@@ -336,7 +332,6 @@ app.get("/", async (c) => {
         </div>
         )}
 
-        {/* UPLOAD AREA */}
         <div class="glass p-6 rounded-2xl mb-8 border border-zinc-700/50 shadow-2xl relative overflow-hidden">
             <div class="absolute top-0 left-0 w-1 h-full bg-yellow-500"></div>
             <div class="flex flex-wrap gap-4 mb-6 border-b border-zinc-800 pb-4">
@@ -344,7 +339,6 @@ app.get("/", async (c) => {
                 <button id="btn-mode-remote" onclick="switchUploadMode('remote')" class="mode-btn px-4 py-2 text-xs font-bold rounded-lg bg-zinc-800 text-gray-400 hover:text-white transition flex items-center gap-2"><i class="fa-solid fa-globe"></i> လင့်ခ်ဖြင့်တင်မည် {isVip ? "" : "(VIP)"}</button>
             </div>
 
-            {/* LOCAL UPLOAD */}
             <div id="mode-local" class="upload-mode">
                 <form id="uploadForm" onsubmit="uploadLocal(event)" class="space-y-5">
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -352,16 +346,9 @@ app.get("/", async (c) => {
                         <div>
                             <label class="text-xs font-bold text-zinc-500 uppercase mb-2 block">သက်တမ်း</label>
                             {isVip ? (
-                                <select name="expiry" class="w-full bg-black border border-yellow-600/50 rounded-xl p-3 text-sm text-yellow-500 font-bold outline-none">
-                                    <option value="0">သက်တမ်းမဲ့ (Lifetime)</option>
-                                    <option value="7">၁ ပတ်</option>
-                                    <option value="30">၁ လ</option>
-                                </select>
+                                <select name="expiry" class="w-full bg-black border border-yellow-600/50 rounded-xl p-3 text-sm text-yellow-500 font-bold outline-none"><option value="0">သက်တမ်းမဲ့ (Lifetime)</option><option value="7">၁ ပတ်</option><option value="30">၁ လ</option></select>
                             ) : (
-                                <div class="relative">
-                                    <input disabled value="၃၀ ရက် (Free Limit)" class="w-full bg-zinc-900 border border-zinc-700 text-gray-500 rounded-xl p-3 text-sm font-bold cursor-not-allowed" />
-                                    <input type="hidden" name="expiry" value="30" />
-                                </div>
+                                <div class="relative"><input disabled value="၃၀ ရက် (Free Limit)" class="w-full bg-zinc-900 border border-zinc-700 text-gray-500 rounded-xl p-3 text-sm font-bold cursor-not-allowed" /><input type="hidden" name="expiry" value="30" /></div>
                             )}
                         </div>
                     </div>
@@ -378,7 +365,6 @@ app.get("/", async (c) => {
                 </form>
             </div>
 
-            {/* REMOTE UPLOAD */}
             <div id="mode-remote" class="upload-mode hidden">
                 <form onsubmit="uploadRemote(event)" class="space-y-5">
                     <div><label class="text-xs font-bold text-zinc-500 uppercase mb-2 block">Direct Video/File URL</label><input id="remoteUrl" type="url" placeholder="https://example.com/video.mp4" class="w-full bg-black border border-zinc-700 rounded-xl p-3 text-sm focus:border-yellow-500 outline-none text-white" /></div>
@@ -396,7 +382,6 @@ app.get("/", async (c) => {
             </div>
         </div>
 
-        {/* FILE LIST */}
         <div class="flex flex-col md:flex-row md:items-center justify-between mb-4 gap-4">
             <h3 class="font-bold text-white text-sm uppercase tracking-wide"><i class="fa-solid fa-list-ul mr-2 text-zinc-500"></i> My Files</h3>
             <div class="flex gap-2 w-full md:w-auto">
@@ -578,10 +563,13 @@ app.get("/admin", async (c) => {
             <div class="overflow-x-auto w-full">
                 <table class="w-full text-left text-sm text-gray-400 min-w-[700px]"> 
                     <thead class="bg-zinc-900 text-[10px] uppercase font-bold text-gray-300 tracking-wider"><tr><th class="px-4 py-3">User</th><th class="px-4 py-3">Plan</th><th class="px-4 py-3">Expiry</th><th class="px-4 py-3 text-center">Update Plan</th><th class="px-4 py-3 text-center">Actions</th></tr></thead>
-                    <tbody class="divide-y divide-zinc-700/50">{users.map(u => (
+                    <tbody class="divide-y divide-zinc-700/50">{users.map(u => {
+                        // FIX FOR ADMIN VIEW: Handle old data gracefully
+                        const planName = PLANS[u.plan]?.name || "Legacy";
+                        return (
                         <tr class="hover:bg-zinc-800/40 transition">
                             <td class="px-4 py-3 font-bold text-white">{u.username}</td>
-                            <td class="px-4 py-3 text-xs">{PLANS[u.plan]?.name || u.plan}</td>
+                            <td class="px-4 py-3 text-xs">{planName}</td>
                             <td class="px-4 py-3 text-xs">{u.vipExpiry ? formatDate(u.vipExpiry) : '-'}</td>
                             <td class="px-4 py-3 text-center">
                                 <form action="/admin/update-plan" method="post" class="flex gap-1 justify-center">
@@ -603,7 +591,7 @@ app.get("/admin", async (c) => {
                                 </div>}
                             </td>
                         </tr>
-                    ))}</tbody>
+                    )})}</tbody>
                 </table>
             </div>
         </div>
