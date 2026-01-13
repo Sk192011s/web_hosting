@@ -524,7 +524,7 @@ app.get("/", async (c) => {
                         <label class="cursor-pointer relative"><input type="radio" name="server_remote" value="2" class="peer sr-only" /><div class="p-3 bg-black border border-zinc-700 rounded-xl peer-checked:border-yellow-500 peer-checked:bg-yellow-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-400 peer-checked:text-white">Server 2</span></div></label>
                     </div>
                     <div id="progressContainerRemote" class="hidden"><div class="flex justify-between text-[10px] uppercase font-bold text-zinc-400 mb-1"><span>Processing...</span><span id="progressTextRemote">0%</span></div><div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="progressBarRemote" class="bg-yellow-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div></div></div>
-                    <button id="remoteBtn" class="w-full bg-zinc-800 text-white border border-zinc-700 font-bold py-3.5 rounded-xl shadow-lg hover:bg-yellow-600 hover:text-black transition">Remote Upload (Max 1.5GB)</button>
+                    <button id="remoteBtn" class="w-full bg-zinc-800 text-white border border-zinc-700 font-bold py-3.5 rounded-xl shadow-lg hover:bg-yellow-600 hover:text-black transition">Remote Upload (Max 2GB)</button>
                 </form>
             </div>
         </div>
@@ -620,7 +620,7 @@ app.post("/api/upload/remote", async (c) => {
                 const totalSize = parseInt(r.headers.get("content-length") || "0");
                 const limitBytes = PLANS[session.user.plan]?.limit || PLANS.free.limit;
                 
-                if(totalSize > MAX_REMOTE_SIZE) throw new Error("File too large (Max 1.5GB)");
+                if(totalSize > MAX_REMOTE_SIZE) throw new Error("File too large (Max 2GB)");
                 if(session.user.usedStorage + totalSize > limitBytes) throw new Error("Storage Full");
 
                 // --- ပြင်ဆင်ထားသော အပိုင်း (START) ---
