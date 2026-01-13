@@ -13,7 +13,7 @@ const kv = await Deno.openKv();
 // =======================
 const ADMIN_USERNAME = Deno.env.get("ADMIN_USERNAME") || "admin"; // Env ကဖတ်မယ် (Default: admin)
 const SECRET_KEY = Deno.env.get("SECRET_SALT") || "secure-random-secret-key-must-change";
-const MAX_REMOTE_SIZE = 1.5 * 1024 * 1024 * 1024; // 1.5 GB
+const MAX_REMOTE_SIZE = 2 * 1024 * 1024 * 1024; // 1.5 GB
 
 const PLANS = {
     free:  { limit: 50 * 1024 * 1024 * 1024, name: "Free Plan" },
@@ -290,14 +290,14 @@ const mainScript = `
                         const msg = JSON.parse(line);
                         if (msg.error) throw new Error(msg.error);
                         if (msg.progress) {
-                             if (msg.progress < 99) submitBtn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> ဒေါင်းလုဒ်ဆွဲနေသည်...';
+                             if (msg.progress < 99) submitBtn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> ဒေါင်းလုဒ်ဆွဲပြီးတင်နေသည်...';
                              else submitBtn.innerHTML = '<i class="fa-solid fa-floppy-disk fa-spin"></i> သိမ်းဆည်းနေသည်...';
                              document.getElementById('progressBarRemote').style.width = msg.progress + "%";
                              document.getElementById('progressTextRemote').innerText = msg.progress + "%";
                         }
                         if (msg.done) {
                             document.getElementById('progressBarRemote').classList.add('bg-green-500');
-                            submitBtn.innerHTML = 'အောင်မြင်သည်';
+                            submitBtn.innerHTML = 'အောင်မြင်ပါသည်';
                             setTimeout(() => window.location.reload(), 1000);
                         }
                     } catch (e) { throw e; }
@@ -608,7 +608,6 @@ app.post("/api/upload/remote", async (c) => {
     const { url, customName, server, expiry, csrf } = await c.req.json();
     if(csrf !== session.csrfToken) return c.json({error: "Invalid CSRF"}, 403);
 
-    // SSRF Check
     if (!isValidRemoteUrl(url)) return c.json({ error: "Invalid URL or Restricted IP" }, 400);
 
     const bodyStream = new ReadableStream({
@@ -624,20 +623,32 @@ app.post("/api/upload/remote", async (c) => {
                 if(totalSize > MAX_REMOTE_SIZE) throw new Error("File too large (Max 1.5GB)");
                 if(session.user.usedStorage + totalSize > limitBytes) throw new Error("Storage Full");
 
-                const ext = mimeToExt(r.headers.get("content-type") || "") || "bin";
+                // --- ပြင်ဆင်ထားသော အပိုင်း (START) ---
+                const contentType = r.headers.get("content-type") || "";
+                let ext = mimeToExt(contentType); 
                 const safeName = (customName || "remote").replace(/[^a-zA-Z0-9.-]/g, "_");
-                const fileName = safeName.endsWith('.'+ext) ? safeName : safeName + '.' + ext;
+                
+                let fileName = safeName;
+                // User က နာမည်မှာ .mp4 လိုမျိုး Extension ထည့်ရေးခဲ့ရင် Auto Detect (.bin) ကို လစ်လျူရှုမယ်
+                if (safeName.includes('.')) {
+                    fileName = safeName; 
+                } else {
+                    // Extension မပါမှသာ System က Detect လုပ်တာကို ထည့်မယ်
+                    fileName = safeName + '.' + ext;
+                }
+                // --- ပြင်ဆင်ထားသော အပိုင်း (END) ---
+
                 const r2Key = `${session.user.username}/${crypto.randomUUID()}-${fileName}`;
                 const fileId = crypto.randomUUID();
                 const client = server === "1" ? s3Server1 : s3Server2;
                 const bucket = server === "1" ? Deno.env.get("R2_1_BUCKET_NAME") : Deno.env.get("R2_2_BUCKET_NAME");
 
-                const upload = new Upload({ client, params: { Bucket: bucket, Key: r2Key, Body: r.body as any, ContentType: r.headers.get("content-type") }, queueSize: 4, partSize: 20 * 1024**2 });
+                const upload = new Upload({ client, params: { Bucket: bucket, Key: r2Key, Body: r.body as any, ContentType: contentType }, queueSize: 4, partSize: 20 * 1024**2 });
                 upload.on("httpUploadProgress", p => { if(totalSize) push({progress: Math.round((p.loaded! / totalSize) * 100)}); });
                 await upload.done();
 
                 const expiryDays = parseInt(expiry) || 0;
-                const type = r.headers.get("content-type")?.startsWith("image/") ? "image" : r.headers.get("content-type")?.startsWith("video/") ? "video" : "other";
+                const type = contentType.startsWith("image/") ? "image" : contentType.startsWith("video/") ? "video" : "other";
                 const fileData: FileData = { id: fileId, name: fileName, sizeBytes: totalSize, size: (totalSize / 1024**2).toFixed(2) + " MB", server, r2Key, uploadedAt: Date.now(), expiresAt: expiryDays > 0 ? Date.now() + (expiryDays * 86400000) : 0, type, isVipFile: true };
                 await kv.atomic().set(["files", session.user.username, fileId], fileData).set(["users", session.user.username], { ...session.user, usedStorage: session.user.usedStorage + totalSize }).commit();
                 push({done: true});
