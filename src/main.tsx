@@ -13,7 +13,7 @@ const kv = await Deno.openKv();
 const ADMIN_USERNAME = "admin";
 const SALT = "my-secret-salt";
 const FREE_STORAGE_LIMIT = 200 * 1024 * 1024; // 200 MB
-const FREE_UPLOAD_LIMIT = 20 * 1024 * 1024;   // 20 MB (Client Check Only)
+const FREE_UPLOAD_LIMIT = 20 * 1024 * 1024;   // 20 MB
 
 const s3Server1 = new S3Client({
   region: "auto",
@@ -84,11 +84,10 @@ function formatDate(ts: number) {
 }
 
 // =======================
-// 3. UI SCRIPTS (DIRECT UPLOAD & FILE NAME FIX)
+// 3. UI SCRIPTS (🔥 FIXED UPLOAD LOGIC)
 // =======================
 const mainScript = `
 <script>
-    // 🔥 1. FILE SELECTION LISTENER
     document.addEventListener("DOMContentLoaded", () => {
         const fileInput = document.getElementById('fileInput');
         const fileNameDisplay = document.getElementById('fileNameDisplay');
@@ -131,7 +130,6 @@ const mainScript = `
         const file = fileInput.files[0];
         const isVip = document.body.dataset.vip === "true";
 
-        // Free User Limit Check
         if(!isVip && file.size > 20 * 1024 * 1024) {
             alert("Free User များသည် 20MB အောက်ဖိုင်များကိုသာ တင်ခွင့်ရှိသည်။");
             return;
@@ -177,34 +175,54 @@ const mainScript = `
             xhr.open("PUT", uploadUrl, true);
             xhr.setRequestHeader("Content-Type", file.type);
             
+            // 🔥 FIXED: Check for any success status (200-299)
             xhr.onload = async () => {
-                if (xhr.status === 200) {
+                if (xhr.status >= 200 && xhr.status < 300) {
                     // 3. Save Metadata
                     submitBtn.innerHTML = 'Saving Data...';
-                    await fetch("/api/save-file-data", {
-                        method: "POST",
-                        body: JSON.stringify({
-                            key,
-                            name: file.name,
-                            customName,
-                            size: file.size,
-                            type: file.type,
-                            server,
-                            finalUrl,
-                            expiry
-                        })
-                    });
                     
-                    progressBar.classList.remove('bg-yellow-500');
-                    progressBar.classList.add('bg-green-500');
-                    submitBtn.innerHTML = '<i class="fa-solid fa-check"></i> ပြီးပါပြီ!';
-                    setTimeout(() => window.location.reload(), 1000);
+                    try {
+                        const saveRes = await fetch("/api/save-file-data", {
+                            method: "POST",
+                            body: JSON.stringify({
+                                key,
+                                name: file.name,
+                                customName,
+                                size: file.size,
+                                type: file.type,
+                                server,
+                                finalUrl,
+                                expiry
+                            })
+                        });
+
+                        if (!saveRes.ok) throw new Error("Database Save Failed");
+
+                        progressBar.classList.remove('bg-yellow-500');
+                        progressBar.classList.add('bg-green-500');
+                        submitBtn.innerHTML = '<i class="fa-solid fa-check"></i> ပြီးပါပြီ!';
+                        setTimeout(() => window.location.reload(), 1000);
+
+                    } catch (dbError) {
+                        alert("R2 Upload အောင်မြင်သော်လည်း Database သိမ်းမရပါ: " + dbError.message);
+                        submitBtn.disabled = false;
+                        submitBtn.innerText = "ပြန်ကြိုးစားပါ";
+                    }
+
                 } else {
-                    throw new Error("Upload Failed");
+                    alert("R2 Upload Failed. Status: " + xhr.status);
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = "Upload Failed";
+                    progressContainer.classList.add('hidden');
                 }
             };
             
-            xhr.onerror = () => { throw new Error("Connection Error"); };
+            xhr.onerror = () => { 
+                alert("Network Connection Error during Upload"); 
+                submitBtn.disabled = false;
+                submitBtn.innerText = "Upload Failed";
+            };
+            
             xhr.send(file);
 
         } catch (e) {
@@ -286,7 +304,6 @@ app.get("/", async (c) => {
 
     return c.html(
         <Layout user={user}>
-            {/* STATS */}
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
                 <div class="glass p-5 rounded-2xl relative overflow-hidden group">
                     <p class="text-xs text-zinc-400 uppercase font-bold mb-1">အကောင့်</p>
@@ -307,7 +324,6 @@ app.get("/", async (c) => {
                 </div>
             </div>
 
-            {/* UPLOAD FORM */}
             <div class="glass p-6 rounded-2xl mb-8 border border-zinc-700/50 shadow-2xl">
                 <h2 class="font-bold text-lg mb-6 flex items-center gap-2 text-white"><span class="bg-blue-600 w-8 h-8 rounded-lg flex items-center justify-center text-sm"><i class="fa-solid fa-cloud-arrow-up"></i></span> ဖိုင်အသစ် တင်ရန်</h2>
                 <form id="uploadForm" onsubmit="uploadFile(event)" class="space-y-5">
@@ -334,7 +350,6 @@ app.get("/", async (c) => {
                         <label class="cursor-pointer relative"><input type="radio" name="server" value="2" class="peer sr-only" /><div class="p-3 bg-zinc-900 border border-zinc-700 rounded-xl peer-checked:border-yellow-500 peer-checked:bg-yellow-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-300 peer-checked:text-white">Server 2</span></div></label>
                     </div>
                     
-                    {/* 🔥 UPDATED FILE INPUT WITH ID HOOKS */}
                     <div class="border-2 border-dashed border-zinc-700 rounded-2xl p-8 text-center hover:border-yellow-500/50 hover:bg-zinc-800/50 transition cursor-pointer group relative">
                         <input type="file" id="fileInput" name="file" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/>
                         <div class="space-y-2 pointer-events-none">
