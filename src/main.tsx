@@ -10,7 +10,7 @@ const kv = await Deno.openKv();
 // =======================
 // 1. CONFIG
 // =======================
-const ADMIN_USERNAME = "admin";
+const ADMIN_USERNAME = "soekyawwin";
 // Security အတွက် Password Hashing မှာသုံးမယ့် Key (env ထဲထည့်သင့်ပါတယ်)
 const SECRET_KEY = Deno.env.get("SECRET_SALT") || "change-this-secret-salt-complex-string";
 
