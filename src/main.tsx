@@ -2,42 +2,36 @@
 import { Hono } from "npm:hono@4";
 import { getCookie, setCookie, deleteCookie } from "npm:hono@4/cookie";
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "npm:@aws-sdk/client-s3";
-import { getSignedUrl } from "npm:@aws-sdk/s3-request-presigner";
 
 const app = new Hono();
 const kv = await Deno.openKv();
 
 // =======================
-// 1. CONFIG & CONSTANTS
+// 1. CONFIG & R2 CLIENTS
 // =======================
 const ADMIN_USERNAME = "admin";
 const SALT = "my-secret-salt";
+// Deno Proxy နဲ့မို့လို့ Free User ကို 20MB ပဲ ကန့်သတ်ထားတာ ပိုစိတ်ချရပါတယ်
 const FREE_STORAGE_LIMIT = 200 * 1024 * 1024; // 200 MB
-const FREE_UPLOAD_LIMIT = 20 * 1024 * 1024;   // 20 MB
+const FREE_UPLOAD_LIMIT = 20 * 1024 * 1024;   // 20 MB 
 
-// 🔥 R2 CLIENT HELPER (FIXED)
-const getR2Config = (server: "1" | "2") => {
-    return {
-        region: "auto",
-        endpoint: `https://${Deno.env.get(`R2_${server}_ACCOUNT_ID`)}.r2.cloudflarestorage.com`,
-        credentials: {
-            accessKeyId: Deno.env.get(`R2_${server}_ACCESS_KEY_ID`)!,
-            secretAccessKey: Deno.env.get(`R2_${server}_SECRET_ACCESS_KEY`)!,
-        },
-    };
-};
+const s3Server1 = new S3Client({
+  region: "auto",
+  endpoint: `https://${Deno.env.get("R2_1_ACCOUNT_ID")}.r2.cloudflarestorage.com`,
+  credentials: {
+    accessKeyId: Deno.env.get("R2_1_ACCESS_KEY_ID")!,
+    secretAccessKey: Deno.env.get("R2_1_SECRET_ACCESS_KEY")!,
+  },
+});
 
-// 🔥 S3 Client with forcePathStyle (Required for R2 Presigned URLs)
-const getS3Client = (server: "1" | "2") => {
-    const config = getR2Config(server);
-    return new S3Client({
-        ...config,
-        forcePathStyle: true // 🔥 IMPORTANT FOR R2
-    });
-}
-
-const s3Server1 = getS3Client("1");
-const s3Server2 = getS3Client("2");
+const s3Server2 = new S3Client({
+  region: "auto",
+  endpoint: `https://${Deno.env.get("R2_2_ACCOUNT_ID")}.r2.cloudflarestorage.com`,
+  credentials: {
+    accessKeyId: Deno.env.get("R2_2_ACCESS_KEY_ID")!,
+    secretAccessKey: Deno.env.get("R2_2_SECRET_ACCESS_KEY")!,
+  },
+});
 
 const DOMAIN_1 = "https://lugyicloud.vercel.app/api/12/";
 const DOMAIN_2 = "https://abc-iqowoq-clouding.vercel.app/api/1/";
@@ -45,8 +39,28 @@ const DOMAIN_2 = "https://abc-iqowoq-clouding.vercel.app/api/1/";
 // =======================
 // 2. TYPES & HELPERS
 // =======================
-interface User { username: string; passwordHash: string; isVip: boolean; vipExpiry?: number; usedStorage: number; createdAt: number; }
-interface FileData { id: string; name: string; sizeBytes: number; size: string; server: "1" | "2"; r2Key: string; downloadUrl: string; uploadedAt: number; expiresAt: number; type: "image" | "video" | "other"; isVipFile: boolean; }
+interface User { 
+    username: string; 
+    passwordHash: string; 
+    isVip: boolean;
+    vipExpiry?: number;
+    usedStorage: number;
+    createdAt: number;
+}
+
+interface FileData { 
+    id: string; 
+    name: string; 
+    sizeBytes: number;
+    size: string;
+    server: "1" | "2"; 
+    r2Key: string;
+    downloadUrl: string; 
+    uploadedAt: number;
+    expiresAt: number;
+    type: "image" | "video" | "other";
+    isVipFile: boolean;
+}
 
 async function hashPassword(text: string) {
     const encoder = new TextEncoder();
@@ -56,14 +70,24 @@ async function hashPassword(text: string) {
 }
 
 async function getUser(username: string) { const res = await kv.get<User>(["users", username]); return res.value; }
-function checkVipStatus(user: User) { return user.vipExpiry ? user.vipExpiry > Date.now() : false; }
+function checkVipStatus(user: User): boolean { return user.vipExpiry ? user.vipExpiry > Date.now() : false; }
 function formatDate(ts: number) { return new Date(ts).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }); }
 
 // =======================
-// 3. UI SCRIPTS (🔥 ROBUST UPLOAD LOGIC)
+// 3. UI SCRIPTS (SIMPLE UPLOAD)
 // =======================
 const mainScript = `
 <script>
+    function switchTab(tab) {
+        document.querySelectorAll('.file-item').forEach(el => el.classList.add('hidden'));
+        document.querySelectorAll('.tab-btn').forEach(el => { el.classList.remove('bg-yellow-500', 'text-black'); el.classList.add('bg-zinc-800', 'text-gray-400'); });
+        document.getElementById('btn-' + tab).classList.remove('bg-zinc-800', 'text-gray-400');
+        document.getElementById('btn-' + tab).classList.add('bg-yellow-500', 'text-black');
+        if(tab === 'all') document.querySelectorAll('.file-item').forEach(el => el.classList.remove('hidden'));
+        else document.querySelectorAll('.type-' + tab).forEach(el => el.classList.remove('hidden'));
+    }
+
+    // FILE NAME DISPLAY
     document.addEventListener("DOMContentLoaded", () => {
         const fileInput = document.getElementById('fileInput');
         const fileNameDisplay = document.getElementById('fileNameDisplay');
@@ -80,17 +104,9 @@ const mainScript = `
         }
     });
 
-    function switchTab(tab) {
-        document.querySelectorAll('.file-item').forEach(el => el.classList.add('hidden'));
-        document.querySelectorAll('.tab-btn').forEach(el => { el.classList.remove('bg-yellow-500', 'text-black'); el.classList.add('bg-zinc-800', 'text-gray-400'); });
-        document.getElementById('btn-' + tab).classList.remove('bg-zinc-800', 'text-gray-400');
-        document.getElementById('btn-' + tab).classList.add('bg-yellow-500', 'text-black');
-        if(tab === 'all') document.querySelectorAll('.file-item').forEach(el => el.classList.remove('hidden'));
-        else document.querySelectorAll('.type-' + tab).forEach(el => el.classList.remove('hidden'));
-    }
-
-    async function uploadFile(event) {
+    function uploadFile(event) {
         event.preventDefault();
+        const form = document.getElementById('uploadForm');
         const fileInput = document.getElementById('fileInput');
         const submitBtn = document.getElementById('submitBtn');
         const progressBar = document.getElementById('progressBar');
@@ -98,77 +114,40 @@ const mainScript = `
         const progressText = document.getElementById('progressText');
 
         if(fileInput.files.length === 0) { alert("ဖိုင်ရွေးပါ"); return; }
-        const file = fileInput.files[0];
-        const isVip = document.body.dataset.vip === "true";
 
-        if(!isVip && file.size > 20 * 1024 * 1024) { alert("Free Limit: 20MB Max"); return; }
-
-        const customName = document.getElementsByName('customName')[0].value;
-        const expiry = document.getElementsByName('expiry')[0].value;
-        const server = document.querySelector('input[name="server"]:checked').value;
+        const formData = new FormData(form);
+        const xhr = new XMLHttpRequest();
 
         progressContainer.classList.remove('hidden');
         submitBtn.disabled = true;
-        submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Getting URL...';
+        submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Uploading...';
 
-        try {
-            // 1. Get Presigned URL
-            // We DO NOT send file.type here, we force "application/octet-stream" on server
-            const presignRes = await fetch("/api/get-upload-url", {
-                method: "POST",
-                body: JSON.stringify({ 
-                    name: file.name, 
-                    size: file.size, 
-                    customName, 
-                    server 
-                })
-            });
-            
-            if(!presignRes.ok) throw new Error(await presignRes.text());
-            const { uploadUrl, key, finalUrl } = await presignRes.json();
+        xhr.upload.addEventListener("progress", (e) => {
+            if (e.lengthComputable) {
+                const percent = Math.round((e.loaded / e.total) * 100);
+                progressBar.style.width = percent + "%";
+                progressText.innerText = percent + "%";
+            }
+        });
 
-            // 2. Upload to R2 (Direct)
-            submitBtn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> Uploading...';
-            const xhr = new XMLHttpRequest();
-            
-            xhr.upload.addEventListener("progress", (e) => {
-                if (e.lengthComputable) {
-                    const percent = Math.round((e.loaded / e.total) * 100);
-                    progressBar.style.width = percent + "%";
-                    progressText.innerText = percent + "%";
-                }
-            });
+        xhr.onload = () => {
+            if (xhr.status === 200) {
+                progressBar.classList.remove('bg-yellow-500');
+                progressBar.classList.add('bg-green-500');
+                submitBtn.innerHTML = '<i class="fa-solid fa-check"></i> ပြီးပါပြီ!';
+                setTimeout(() => window.location.reload(), 1000);
+            } else {
+                alert("Upload Failed: " + xhr.responseText);
+                submitBtn.disabled = false;
+                submitBtn.innerText = "ပြန်ကြိုးစားပါ";
+                progressContainer.classList.add('hidden');
+            }
+        };
 
-            xhr.open("PUT", uploadUrl, true);
-            
-            // 🔥 CRITICAL FIX: Force binary type to match server signature
-            // This prevents mismatch errors if browser guesses MIME type wrongly
-            xhr.setRequestHeader("Content-Type", "application/octet-stream"); 
-
-            xhr.onload = async () => {
-                if (xhr.status >= 200 && xhr.status < 300) {
-                    // 3. Save Data
-                    submitBtn.innerHTML = 'Saving...';
-                    await fetch("/api/save-file-data", {
-                        method: "POST",
-                        body: JSON.stringify({ key, name: file.name, customName, size: file.size, type: file.type, server, finalUrl, expiry })
-                    });
-                    progressBar.classList.remove('bg-yellow-500'); progressBar.classList.add('bg-green-500');
-                    submitBtn.innerHTML = 'Success!';
-                    setTimeout(() => window.location.reload(), 1000);
-                } else {
-                    alert("R2 Upload Error (Status " + xhr.status + "). Check CORS & Bucket Name.");
-                    submitBtn.disabled = false; submitBtn.innerText = "Retry";
-                }
-            };
-            xhr.onerror = () => { alert("Network Error! Check CORS."); submitBtn.disabled = false; submitBtn.innerText = "Retry"; };
-            xhr.send(file);
-
-        } catch (e) {
-            alert("Error: " + e.message);
-            submitBtn.disabled = false; submitBtn.innerText = "Retry";
-            progressContainer.classList.add('hidden');
-        }
+        xhr.onerror = () => { alert("Connection Error"); submitBtn.disabled = false; };
+        // 🔥 POST DIRECTLY TO DENO SERVER
+        xhr.open("POST", "/upload");
+        xhr.send(formData);
     }
 </script>
 `;
@@ -207,13 +186,15 @@ app.get("/", async (c) => {
     for await (const res of iter) { files.push(res.value); totalBytes += res.value.sizeBytes; }
 
     const totalMB = (totalBytes / 1024 / 1024).toFixed(2);
-    const limitBytes = isVip ? 1000 * 1024 * 1024 * 1024 * 1024 : FREE_STORAGE_LIMIT; 
+    // Proxy Upload မို့ VIP လည်း အရမ်းကြီးပေးလို့မရပါ (Server Limit ရှိလို့)
+    const limitBytes = isVip ? 500 * 1024 * 1024 : FREE_STORAGE_LIMIT; 
+    const displayLimit = isVip ? "500 MB (Server Limit)" : "200 MB";
     const usedPercent = Math.min(100, (totalBytes / limitBytes) * 100);
 
     return c.html(<Layout user={user}>
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
             <div class="glass p-5 rounded-2xl relative overflow-hidden group"><p class="text-xs text-zinc-400 uppercase font-bold mb-1">အကောင့်</p><p class={`text-2xl font-black ${isVip ? 'text-yellow-500' : 'text-zinc-300'}`}>{isVip ? "VIP PRO" : "Free Plan"}</p>{isVip && user.vipExpiry && <p class="text-[10px] text-green-400 mt-2 font-mono bg-green-900/20 inline-block px-2 py-1 rounded">EXP: {formatDate(user.vipExpiry)}</p>}<a href="/change-password" class="absolute bottom-4 right-4 text-xs text-zinc-500 hover:text-white transition"><i class="fa-solid fa-key mr-1"></i> Pass</a></div>
-            <div class="glass p-5 rounded-2xl relative"><div class="flex justify-between items-end mb-2"><div><p class="text-xs text-zinc-400 uppercase font-bold">Storage</p><p class="text-xl font-bold text-white">{totalMB} <span class="text-sm text-zinc-500">/ {isVip ? "∞" : "200 MB"}</span></p></div><span class="text-2xl font-black text-zinc-600">{usedPercent.toFixed(0)}%</span></div><div class="w-full bg-zinc-800 rounded-full h-3 overflow-hidden"><div class={`h-full rounded-full ${isVip ? 'bg-gradient-to-r from-yellow-600 to-yellow-400' : 'bg-zinc-500'}`} style={`width: ${usedPercent}%`}></div></div></div>
+            <div class="glass p-5 rounded-2xl relative"><div class="flex justify-between items-end mb-2"><div><p class="text-xs text-zinc-400 uppercase font-bold">Storage</p><p class="text-xl font-bold text-white">{totalMB} <span class="text-sm text-zinc-500">/ {displayLimit}</span></p></div><span class="text-2xl font-black text-zinc-600">{usedPercent.toFixed(0)}%</span></div><div class="w-full bg-zinc-800 rounded-full h-3 overflow-hidden"><div class={`h-full rounded-full ${isVip ? 'bg-gradient-to-r from-yellow-600 to-yellow-400' : 'bg-zinc-500'}`} style={`width: ${usedPercent}%`}></div></div></div>
             <div class="glass p-5 rounded-2xl flex items-center justify-between"><div><p class="text-xs text-zinc-400 uppercase font-bold">ဖိုင်များ</p><p class="text-3xl font-black text-white">{files.length}</p></div><div class="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-500 text-2xl"><i class="fa-solid fa-folder-open"></i></div></div>
         </div>
         <div class="glass p-6 rounded-2xl mb-8 border border-zinc-700/50 shadow-2xl">
@@ -229,7 +210,7 @@ app.get("/", async (c) => {
                 </div>
                 <div class="border-2 border-dashed border-zinc-700 rounded-2xl p-8 text-center hover:border-yellow-500/50 hover:bg-zinc-800/50 transition cursor-pointer group relative">
                     <input type="file" id="fileInput" name="file" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/>
-                    <div class="space-y-2 pointer-events-none"><div class="w-12 h-12 bg-zinc-800 rounded-full flex items-center justify-center mx-auto text-zinc-400 group-hover:text-yellow-500 transition"><i id="uploadIcon" class="fa-solid fa-plus text-xl"></i></div><p id="fileNameDisplay" class="text-sm font-bold text-zinc-300 truncate px-4">ဖိုင်ရွေးချယ်ရန် နှိပ်ပါ</p><p class="text-[10px] text-zinc-500">{isVip ? "Max Size: Unlimited" : "Max Size: 20MB"}</p></div>
+                    <div class="space-y-2 pointer-events-none"><div class="w-12 h-12 bg-zinc-800 rounded-full flex items-center justify-center mx-auto text-zinc-400 group-hover:text-yellow-500 transition"><i id="uploadIcon" class="fa-solid fa-plus text-xl"></i></div><p id="fileNameDisplay" class="text-sm font-bold text-zinc-300 truncate px-4">ဖိုင်ရွေးချယ်ရန် နှိပ်ပါ</p><p class="text-[10px] text-zinc-500">{isVip ? "Max Size: 50MB (Server Limit)" : "Max Size: 20MB"}</p></div>
                 </div>
                 <div id="progressContainer" class="hidden"><div class="flex justify-between text-[10px] uppercase font-bold text-zinc-400 mb-1"><span>Uploading...</span><span id="progressText">0%</span></div><div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="progressBar" class="bg-yellow-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div></div></div>
                 <button id="submitBtn" class="w-full bg-gradient-to-r from-yellow-600 to-yellow-500 text-black font-bold py-3.5 rounded-xl shadow-lg hover:brightness-110 transition active:scale-95">တင်မည်</button>
@@ -240,85 +221,78 @@ app.get("/", async (c) => {
     </Layout>);
 });
 
-// 🔥 API 1: GET PRESIGNED URL (FORCE APPLICATION/OCTET-STREAM)
-app.post("/api/get-upload-url", async (c) => {
-    try {
-        const cookie = getCookie(c, "auth");
-        if(!cookie) return c.text("Unauthorized", 401);
-        const user = await getUser(cookie);
-        if(!user) return c.text("Login required", 401);
+// 🔥 PROXY UPLOAD HANDLER (No CORS Issues)
+app.post("/upload", async (c) => {
+    const cookie = getCookie(c, "auth");
+    if(!cookie) return c.text("Unauthorized", 401);
+    const user = await getUser(cookie);
+    if(!user) return c.text("Login required", 401);
 
-        const isVip = checkVipStatus(user);
-        const { name, size, customName, server } = await c.req.json();
+    const isVip = checkVipStatus(user);
+    const body = await c.req.parseBody();
+    const file = body['file'];
+    const serverChoice = String(body['server']);
+    const customName = String(body['customName']).trim();
+    let expiryDays = parseInt(String(body['expiry'])) || 30;
 
-        if (!isVip) {
-            if (size > FREE_UPLOAD_LIMIT) return c.text("Free Limit Exceeded (Max 20MB)", 403);
-            if (user.usedStorage + size > FREE_STORAGE_LIMIT) return c.text("Storage Full (Max 200MB)", 403);
-        }
-
-        let finalName = name;
-        if (customName) {
-            const ext = name.split('.').pop();
-            finalName = customName.endsWith('.' + ext) ? customName : customName + '.' + ext;
-        }
-        const safeName = finalName.replace(/[^a-zA-Z0-9.-]/g, "_");
-        const r2Key = `${user.username}/${crypto.randomUUID()}-${safeName}`;
-
-        const client = server === "1" ? s3Server1 : s3Server2;
-        const bucket = Deno.env.get(`R2_${server}_BUCKET_NAME`)!;
-
-        // 🔥 FORCE GENERIC CONTENT TYPE (Browser and Server must match)
-        const command = new PutObjectCommand({
-            Bucket: bucket,
-            Key: r2Key,
-            ContentType: "application/octet-stream", 
-            ContentDisposition: 'inline'
-        });
-
-        const uploadUrl = await getSignedUrl(client, command, { expiresIn: 3600 });
-        const finalUrl = server === "1" ? `${DOMAIN_1}${r2Key}` : `${DOMAIN_2}${r2Key}`;
-
-        return c.json({ uploadUrl, key: r2Key, finalUrl });
-    } catch (e: any) {
-        console.error("Presign Error:", e);
-        return c.text(e.message, 500);
+    // Limit Check
+    if (!isVip) {
+        expiryDays = 30;
+        if (user.usedStorage + file.size > FREE_STORAGE_LIMIT) return c.text("Storage Full! (Free 200MB Limit)", 400);
     }
-});
 
-// 🔥 API 2: SAVE FILE DATA
-app.post("/api/save-file-data", async (c) => {
-    try {
-        const cookie = getCookie(c, "auth");
-        const user = await getUser(cookie || "");
-        if(!user) return c.text("Unauthorized", 401);
+    if (file instanceof File) {
+        if(file.size > 50 * 1024 * 1024) return c.text("File too large for server proxy (Max 50MB)", 400);
 
-        const { key, name, customName, size, type, server, finalUrl, expiry } = await c.req.json();
-        const isVip = checkVipStatus(user);
-        const expiryDays = isVip ? parseInt(expiry) : 30;
+        try {
+            let finalName = file.name;
+            if (customName) {
+                const ext = file.name.split('.').pop();
+                finalName = customName.endsWith('.' + ext) ? customName : customName + '.' + ext;
+            }
+            const safeName = finalName.replace(/[^a-zA-Z0-9.-]/g, "_");
+            const r2Key = `${user.username}/${crypto.randomUUID()}-${safeName}`;
 
-        const fileData: FileData = {
-            id: crypto.randomUUID(),
-            name: customName || name,
-            size: (size / 1024 / 1024).toFixed(2) + " MB",
-            sizeBytes: size,
-            server: server,
-            r2Key: key,
-            downloadUrl: finalUrl,
-            uploadedAt: Date.now(),
-            type: type.startsWith("image/") ? "image" : type.startsWith("video/") ? "video" : "other",
-            expiresAt: expiryDays > 0 ? Date.now() + (expiryDays * 86400000) : 0,
-            isVipFile: isVip && expiryDays === 0
-        };
+            let type: any = "other";
+            if (file.type.startsWith("image/")) type = "image";
+            else if (file.type.startsWith("video/")) type = "video";
 
-        await kv.set(["files", user.username, fileData.id], fileData);
-        user.usedStorage += size;
-        await kv.set(["users", user.username], user);
+            const client = serverChoice === "1" ? s3Server1 : s3Server2;
+            const bucket = serverChoice === "1" ? Deno.env.get("R2_1_BUCKET_NAME") : Deno.env.get("R2_2_BUCKET_NAME");
 
-        return c.json({ success: true });
-    } catch (e: any) {
-        console.error("Save Data Error:", e);
-        return c.text(e.message, 500);
+            // 🔥 Upload via Deno Server (Proxy)
+            await client.send(new PutObjectCommand({
+                Bucket: bucket, 
+                Key: r2Key, 
+                Body: new Uint8Array(await file.arrayBuffer()), 
+                ContentType: file.type,
+                ContentDisposition: 'inline' // Auto Play
+            }));
+
+            const finalUrl = serverChoice === "1" ? `${DOMAIN_1}${r2Key}` : `${DOMAIN_2}${r2Key}`;
+            
+            const fileData: FileData = {
+                id: crypto.randomUUID(),
+                name: finalName,
+                size: (file.size / 1024 / 1024).toFixed(2) + " MB",
+                sizeBytes: file.size,
+                server: serverChoice as "1" | "2",
+                r2Key: r2Key,
+                downloadUrl: finalUrl,
+                uploadedAt: Date.now(),
+                type: type,
+                expiresAt: expiryDays > 0 ? Date.now() + (expiryDays * 86400000) : 0,
+                isVipFile: isVip && expiryDays === 0
+            };
+
+            await kv.set(["files", user.username, fileData.id], fileData);
+            user.usedStorage += file.size;
+            await kv.set(["users", user.username], user);
+
+            return c.text("Success");
+        } catch (e: any) { return c.text("Upload Failed: " + e.message, 500); }
     }
+    return c.text("No file", 400);
 });
 
 // 🔥 CRON JOB
