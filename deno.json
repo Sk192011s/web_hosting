@@ -1,0 +1,6 @@
+{
+  "tasks": {
+    // အရင်က main.ts ဖြစ်နေရင် main.tsx လို့ပြောင်းပါ
+    "start": "deno run --allow-net --allow-read --allow-env --unstable-kv src/main.tsx"
+  }
+}
