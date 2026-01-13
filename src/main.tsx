@@ -349,41 +349,104 @@ app.get("/d/:server/*", async (c) => {
 });
 
 // =======================
-// 7. ADMIN PANEL (FULL FEATURED)
+// 7. ADMIN PANEL (MOBILE RESPONSIVE FIX)
 // =======================
 app.get("/admin", async (c) => { 
     const cookie = getCookie(c, "auth"); 
     const currentUser = await getUser(cookie || "");
+    
+    // Check Admin
     if(!currentUser || currentUser.username !== ADMIN_USERNAME) return c.redirect("/"); 
 
     const iter = kv.list<User>({ prefix: ["users"] }); 
     const users = []; 
     let totalStorage = 0;
-    for await (const res of iter) { users.push(res.value); totalStorage += res.value.usedStorage; }
+    
+    for await (const res of iter) { 
+        users.push(res.value); 
+        totalStorage += res.value.usedStorage;
+    }
+    
     const totalGB = (totalStorage / 1024 / 1024 / 1024).toFixed(2);
 
     return c.html(
     <Layout title="Admin Panel" user={currentUser}>
-        <div class="space-y-8">
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <div class="glass p-4 rounded-xl border-l-4 border-yellow-500"><p class="text-xs text-gray-400 uppercase">Total Users</p><p class="text-2xl font-black">{users.length}</p></div>
-                <div class="glass p-4 rounded-xl border-l-4 border-blue-500"><p class="text-xs text-gray-400 uppercase">Total Storage</p><p class="text-2xl font-black">{totalGB} <span class="text-sm">GB</span></p></div>
+        <div class="space-y-6">
+            
+            {/* Dashboard Stats (Grid 2 ခုခွဲထားလိုက်တာ ဖုန်းမှာကြည့်ကောင်းသွားမယ်) */}
+            <div class="grid grid-cols-2 gap-3">
+                <div class="glass p-4 rounded-xl border-l-4 border-yellow-500 relative">
+                    <p class="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Total Users</p>
+                    <p class="text-2xl font-black mt-1">{users.length}</p>
+                    <i class="fa-solid fa-users absolute top-4 right-4 text-zinc-700 text-xl"></i>
+                </div>
+                <div class="glass p-4 rounded-xl border-l-4 border-blue-500 relative">
+                    <p class="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Storage Used</p>
+                    <p class="text-2xl font-black mt-1">{totalGB} <span class="text-sm font-normal text-gray-500">GB</span></p>
+                    <i class="fa-solid fa-server absolute top-4 right-4 text-zinc-700 text-xl"></i>
+                </div>
             </div>
-            <div class="glass rounded-xl overflow-hidden">
-                <div class="bg-zinc-800/50 px-6 py-4 border-b border-zinc-700"><h3 class="font-bold text-white">User Manager</h3></div>
-                <div class="overflow-x-auto">
-                    <table class="w-full text-left text-sm text-gray-400">
-                        <thead class="bg-zinc-900 text-xs uppercase font-bold text-gray-200"><tr><th class="px-6 py-3">User</th><th class="px-6 py-3">Storage</th><th class="px-6 py-3">Status</th><th class="px-6 py-3">Actions</th></tr></thead>
-                        <tbody class="divide-y divide-zinc-700">
+
+            {/* User Manager Table (Mobile Responsive Scroll) */}
+            <div class="glass rounded-xl overflow-hidden border border-zinc-700/50">
+                <div class="bg-zinc-800/50 px-4 py-3 border-b border-zinc-700 flex items-center justify-between">
+                    <h3 class="font-bold text-white text-sm"><i class="fa-solid fa-users-gear mr-2 text-yellow-500"></i> User Manager</h3>
+                    <span class="text-[10px] text-gray-500 bg-zinc-900 px-2 py-1 rounded">Scroll >></span>
+                </div>
+                
+                {/* ဒီနေရာမှာ overflow-x-auto ထည့်လိုက်လို့ ဖုန်းနဲ့ဆို ဘေးကိုဆွဲကြည့်လို့ရသွားပြီ */}
+                <div class="overflow-x-auto w-full">
+                    <table class="w-full text-left text-sm text-gray-400 min-w-[600px]"> 
+                        <thead class="bg-zinc-900 text-[10px] uppercase font-bold text-gray-300 tracking-wider">
+                            <tr>
+                                <th class="px-4 py-3">User</th>
+                                <th class="px-4 py-3">Storage</th>
+                                <th class="px-4 py-3">Status</th>
+                                <th class="px-4 py-3 text-center">VIP & Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-zinc-700/50">
                             {users.map(u => (
-                                <tr class="hover:bg-zinc-800/50 transition">
-                                    <td class="px-6 py-4 font-bold text-white">{u.username}</td>
-                                    <td class="px-6 py-4">{(u.usedStorage/1024/1024).toFixed(2)} MB</td>
-                                    <td class="px-6 py-4">{checkVipStatus(u) ? <span class="text-yellow-500 font-bold">VIP</span> : "Free"}</td>
-                                    <td class="px-6 py-4 flex gap-2">
-                                        <form action="/admin/vip" method="post"><input type="hidden" name="username" value={u.username} /><select name="days" onchange="this.form.submit()" class="bg-zinc-900 border border-zinc-600 rounded text-xs p-1"><option value="">VIP...</option><option value="30">1 Month</option><option value="-1">Remove</option></select></form>
-                                        {u.username !== ADMIN_USERNAME && <form action="/admin/delete-user" method="post" onsubmit="return confirm('Delete user?')"><input type="hidden" name="username" value={u.username} /><button class="text-red-500 hover:text-white"><i class="fa-solid fa-trash"></i></button></form>}
-                                        <form action="/admin/reset-pass" method="post" onsubmit="return confirm('Reset to 123456?')"><input type="hidden" name="username" value={u.username} /><button class="text-blue-500 hover:text-white"><i class="fa-solid fa-key"></i></button></form>
+                                <tr class="hover:bg-zinc-800/40 transition">
+                                    <td class="px-4 py-3 font-bold text-white">
+                                        <div class="flex items-center gap-2">
+                                            <div class="w-6 h-6 rounded-full bg-zinc-700 flex items-center justify-center text-[10px]">{u.username.charAt(0).toUpperCase()}</div>
+                                            {u.username}
+                                        </div>
+                                    </td>
+                                    <td class="px-4 py-3 text-xs font-mono">{(u.usedStorage/1024/1024).toFixed(2)} MB</td>
+                                    <td class="px-4 py-3">
+                                        {checkVipStatus(u) ? 
+                                            <span class="bg-yellow-500/10 text-yellow-500 px-2 py-0.5 rounded text-[10px] font-bold border border-yellow-500/20">VIP</span> : 
+                                            <span class="bg-zinc-700/50 text-zinc-400 px-2 py-0.5 rounded text-[10px]">Free</span>
+                                        }
+                                    </td>
+                                    <td class="px-4 py-3 flex items-center justify-center gap-2">
+                                        {/* VIP Control */}
+                                        <form action="/admin/vip" method="post">
+                                            <input type="hidden" name="username" value={u.username} />
+                                            <select name="days" onchange="this.form.submit()" class="bg-black/40 border border-zinc-600 rounded text-[10px] py-1 px-2 outline-none focus:border-yellow-500 text-gray-300">
+                                                <option value="">Add VIP...</option>
+                                                <option value="30">1 Month</option>
+                                                <option value="150">5 Months</option>
+                                                <option value="365">1 Year</option>
+                                                <option value="-1">Remove VIP</option>
+                                            </select>
+                                        </form>
+
+                                        {/* Actions */}
+                                        {u.username !== ADMIN_USERNAME && (
+                                            <div class="flex gap-1">
+                                                <form action="/admin/delete-user" method="post" onsubmit="return confirm('အကောင့်ရော ဖိုင်တွေပါ အကုန်ဖျက်မှာလား?')">
+                                                    <input type="hidden" name="username" value={u.username} />
+                                                    <button class="w-6 h-6 flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white rounded transition"><i class="fa-solid fa-trash text-[10px]"></i></button>
+                                                </form>
+                                                <form action="/admin/reset-pass" method="post" onsubmit="return confirm('Password ကို 123456 ပြောင်းမှာလား?')">
+                                                    <input type="hidden" name="username" value={u.username} />
+                                                    <button class="w-6 h-6 flex items-center justify-center bg-blue-500/10 text-blue-500 hover:bg-blue-500 hover:text-white rounded transition"><i class="fa-solid fa-key text-[10px]"></i></button>
+                                                </form>
+                                            </div>
+                                        )}
                                     </td>
                                 </tr>
                             ))}
