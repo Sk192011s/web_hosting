@@ -28,8 +28,9 @@ const s3Server2 = new S3Client({
   },
 });
 
-const DOMAIN_1 = "https://abc-iqowoq-clouding.vercel.app/api/1/";
-const DOMAIN_2 = "https://lugyicloud.vercel.app/api/12/";
+// 🔥 LINKS SWAPPED (Server 1 & 2 နေရာချိန်းလိုက်ပါပြီ)
+const DOMAIN_1 = "https://lugyicloud.vercel.app/api/12/";
+const DOMAIN_2 = "https://abc-iqowoq-clouding.vercel.app/api/1/";
 
 // =======================
 // 2. HELPER FUNCTIONS
@@ -67,13 +68,11 @@ const uploadScript = `
         const progressContainer = document.getElementById('progressContainer');
         const submitBtn = document.getElementById('submitBtn');
 
-        // UI ပြောင်းလဲခြင်း
         progressContainer.classList.remove('hidden');
         submitBtn.disabled = true;
         submitBtn.classList.add('opacity-50', 'cursor-not-allowed');
         submitBtn.innerText = "တင်နေပါသည်...";
 
-        // Progress တွက်ချက်ခြင်း
         xhr.upload.addEventListener("progress", (e) => {
             if (e.lengthComputable) {
                 const percent = Math.round((e.loaded / e.total) * 100);
@@ -82,10 +81,8 @@ const uploadScript = `
             }
         });
 
-        // ပြီးဆုံးသွားသောအခါ
         xhr.onload = () => {
             if (xhr.status === 200) {
-                // Success
                 progressBar.classList.remove('bg-blue-600');
                 progressBar.classList.add('bg-green-500');
                 submitBtn.innerText = "အောင်မြင်ပါသည်!";
@@ -118,7 +115,6 @@ const Layout = (props: { children: any; title?: string; user?: User | null }) =>
             <title>{props.title || "Gold Storage"}</title>
             <script src="https://cdn.tailwindcss.com"></script>
             <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet" />
-            {/* Font for Myanmar Text (Optional but good for some devices) */}
             <link href="https://fonts.googleapis.com/css2?family=Padauk:wght@400;700&display=swap" rel="stylesheet" />
             <style>{`body { font-family: 'Padauk', sans-serif; }`}</style>
         </head>
@@ -130,7 +126,6 @@ const Layout = (props: { children: any; title?: string; user?: User | null }) =>
                 {props.user ? (
                     <div class="flex gap-3 items-center">
                         <span class="text-xs font-bold text-gray-400 hidden sm:inline">မင်္ဂလာပါ, {props.user.username}</span>
-                        <span class="bg-yellow-500 text-black px-2 py-0.5 rounded uppercase text-[10px] font-bold">{props.user.role === 'vip' ? 'VIP' : 'FREE'}</span>
                         <a href="/logout" class="text-xs bg-red-600 px-3 py-1.5 rounded hover:bg-red-500 transition font-bold">ထွက်မည်</a>
                     </div>
                 ) : (
@@ -147,7 +142,6 @@ const Layout = (props: { children: any; title?: string; user?: User | null }) =>
 // 3. ROUTES
 // =======================
 
-// 🔥 HOME / DASHBOARD
 app.get("/", async (c) => {
     const cookie = getCookie(c, "auth");
     if(!cookie) return c.redirect("/login");
@@ -157,10 +151,30 @@ app.get("/", async (c) => {
 
     const iter = kv.list<FileData>({ prefix: ["files", user.username] }, { reverse: true });
     const files = [];
-    for await (const res of iter) files.push(res.value);
+    let totalMB = 0; // Storage တွက်ဖို့
+
+    for await (const res of iter) {
+        files.push(res.value);
+        // Size string (e.g., "12.50 MB") ကနေ ဂဏန်းပြန်ထုတ်ပြီး ပေါင်းမယ်
+        const sizeNum = parseFloat(res.value.size.split(' ')[0]);
+        if (!isNaN(sizeNum)) totalMB += sizeNum;
+    }
 
     return c.html(
         <Layout user={user}>
+            
+            {/* 🔥 STORAGE USAGE DISPLAY */}
+            <div class="grid grid-cols-2 gap-4 mb-6">
+                <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow flex flex-col justify-center">
+                    <span class="text-xs font-bold text-gray-400 uppercase mb-1">Total Files</span>
+                    <span class="text-2xl font-black text-white">{files.length}</span>
+                </div>
+                <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow flex flex-col justify-center">
+                    <span class="text-xs font-bold text-gray-400 uppercase mb-1">Storage Used</span>
+                    <span class="text-2xl font-black text-yellow-500">{totalMB.toFixed(2)} MB</span>
+                </div>
+            </div>
+
             {/* UPLOAD BOX */}
             <div class="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg mb-8">
                 <h2 class="font-bold text-lg mb-4 flex items-center gap-2 text-blue-400">
@@ -177,7 +191,7 @@ app.get("/", async (c) => {
                                 <input type="radio" name="server" value="1" class="peer sr-only" checked />
                                 <div class="p-3 bg-slate-900 border border-slate-700 rounded-lg peer-checked:border-blue-500 peer-checked:bg-blue-500/10 text-center transition hover:bg-slate-700 group-active:scale-95">
                                     <span class="font-bold text-sm block text-white">Server 1</span>
-                                    <span class="text-[10px] text-gray-500">abc-iqowoq</span>
+                                    {/* 🔥 LABELS HIDDEN */}
                                 </div>
                                 <div class="absolute top-2 right-2 text-blue-500 opacity-0 peer-checked:opacity-100"><i class="fa-solid fa-circle-check"></i></div>
                             </label>
@@ -185,7 +199,7 @@ app.get("/", async (c) => {
                                 <input type="radio" name="server" value="2" class="peer sr-only" />
                                 <div class="p-3 bg-slate-900 border border-slate-700 rounded-lg peer-checked:border-yellow-500 peer-checked:bg-yellow-500/10 text-center transition hover:bg-slate-700 group-active:scale-95">
                                     <span class="font-bold text-sm block text-white">Server 2</span>
-                                    <span class="text-[10px] text-gray-500">lugyicloud</span>
+                                    {/* 🔥 LABELS HIDDEN */}
                                 </div>
                                 <div class="absolute top-2 right-2 text-yellow-500 opacity-0 peer-checked:opacity-100"><i class="fa-solid fa-circle-check"></i></div>
                             </label>
@@ -200,7 +214,7 @@ app.get("/", async (c) => {
                         </p>
                     </div>
 
-                    {/* 🔥 PROGRESS BAR AREA */}
+                    {/* PROGRESS BAR AREA */}
                     <div id="progressContainer" class="hidden">
                         <div class="flex justify-between text-xs text-gray-300 mb-1 font-bold">
                             <span>Uploading...</span>
@@ -290,6 +304,7 @@ app.post("/upload", async (c) => {
             }));
 
             let finalUrl = "";
+            // 🔥 LINK LOGIC UPDATED
             if (serverChoice === "1") {
                 finalUrl = `${DOMAIN_1}${objectKey}`;
             } else {
@@ -316,7 +331,7 @@ app.post("/upload", async (c) => {
     return c.text("No file selected", 400);
 });
 
-// 🔥 LOGIN PAGE (BURMESE)
+// 🔥 LOGIN PAGE
 app.get("/login", (c) => c.html(
     <Layout title="Login">
         <div class="max-w-sm mx-auto mt-20 bg-slate-800 p-8 rounded-xl border border-slate-700 shadow-2xl">
