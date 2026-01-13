@@ -1,4 +1,4 @@
-/** @jsxImportSource npm:hono@4/jsx */ 
+/** @jsxImportSource npm:hono@4/jsx */
 import { Hono } from "npm:hono@4";
 import { getCookie, setCookie, deleteCookie } from "npm:hono@4/cookie";
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "npm:@aws-sdk/client-s3";
@@ -15,26 +15,29 @@ const SALT = "my-secret-salt";
 const FREE_STORAGE_LIMIT = 200 * 1024 * 1024; // 200 MB
 const FREE_UPLOAD_LIMIT = 20 * 1024 * 1024;   // 20 MB
 
-// 🔥 R2 Client Helper (Fixed for Presigned URLs)
-const getR2Client = (server: "1" | "2") => {
-    const accountId = Deno.env.get(`R2_${server}_ACCOUNT_ID`);
-    const accessKeyId = Deno.env.get(`R2_${server}_ACCESS_KEY_ID`);
-    const secretAccessKey = Deno.env.get(`R2_${server}_SECRET_ACCESS_KEY`);
-
-    // Console Log for Debugging (Secret will be hidden in production logs usually, but good to check existence)
-    if (!accountId || !accessKeyId || !secretAccessKey) {
-        console.error(`❌ Missing Config for Server ${server}:`, { accountId: !!accountId, accessKeyId: !!accessKeyId });
-        throw new Error(`Server ${server} Config Missing in Deno Env`);
-    }
-
-    return new S3Client({
+// 🔥 R2 CLIENT HELPER (FIXED)
+const getR2Config = (server: "1" | "2") => {
+    return {
         region: "auto",
-        endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
-        credentials: { accessKeyId, secretAccessKey },
-        // 🔥 CRITICAL FIX: This is required for R2 Presigned URLs
-        forcePathStyle: true 
-    });
+        endpoint: `https://${Deno.env.get(`R2_${server}_ACCOUNT_ID`)}.r2.cloudflarestorage.com`,
+        credentials: {
+            accessKeyId: Deno.env.get(`R2_${server}_ACCESS_KEY_ID`)!,
+            secretAccessKey: Deno.env.get(`R2_${server}_SECRET_ACCESS_KEY`)!,
+        },
+    };
 };
+
+// 🔥 S3 Client with forcePathStyle (Required for R2 Presigned URLs)
+const getS3Client = (server: "1" | "2") => {
+    const config = getR2Config(server);
+    return new S3Client({
+        ...config,
+        forcePathStyle: true // 🔥 IMPORTANT FOR R2
+    });
+}
+
+const s3Server1 = getS3Client("1");
+const s3Server2 = getS3Client("2");
 
 const DOMAIN_1 = "https://lugyicloud.vercel.app/api/12/";
 const DOMAIN_2 = "https://abc-iqowoq-clouding.vercel.app/api/1/";
@@ -57,7 +60,7 @@ function checkVipStatus(user: User) { return user.vipExpiry ? user.vipExpiry > D
 function formatDate(ts: number) { return new Date(ts).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }); }
 
 // =======================
-// 3. UI SCRIPTS (DIRECT UPLOAD LOGIC)
+// 3. UI SCRIPTS (🔥 ROBUST UPLOAD LOGIC)
 // =======================
 const mainScript = `
 <script>
@@ -110,16 +113,18 @@ const mainScript = `
 
         try {
             // 1. Get Presigned URL
+            // We DO NOT send file.type here, we force "application/octet-stream" on server
             const presignRes = await fetch("/api/get-upload-url", {
                 method: "POST",
-                body: JSON.stringify({ name: file.name, type: file.type || "application/octet-stream", size: file.size, customName, server })
+                body: JSON.stringify({ 
+                    name: file.name, 
+                    size: file.size, 
+                    customName, 
+                    server 
+                })
             });
             
-            if(!presignRes.ok) {
-                const errorText = await presignRes.text();
-                throw new Error("Server Error: " + errorText);
-            }
-            
+            if(!presignRes.ok) throw new Error(await presignRes.text());
             const { uploadUrl, key, finalUrl } = await presignRes.json();
 
             // 2. Upload to R2 (Direct)
@@ -135,8 +140,10 @@ const mainScript = `
             });
 
             xhr.open("PUT", uploadUrl, true);
-            // 🔥 Match Content-Type exactly with what server signed
-            xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream"); 
+            
+            // 🔥 CRITICAL FIX: Force binary type to match server signature
+            // This prevents mismatch errors if browser guesses MIME type wrongly
+            xhr.setRequestHeader("Content-Type", "application/octet-stream"); 
 
             xhr.onload = async () => {
                 if (xhr.status >= 200 && xhr.status < 300) {
@@ -150,7 +157,7 @@ const mainScript = `
                     submitBtn.innerHTML = 'Success!';
                     setTimeout(() => window.location.reload(), 1000);
                 } else {
-                    alert("R2 Upload Error (Status " + xhr.status + "). Check Browser Console.");
+                    alert("R2 Upload Error (Status " + xhr.status + "). Check CORS & Bucket Name.");
                     submitBtn.disabled = false; submitBtn.innerText = "Retry";
                 }
             };
@@ -158,7 +165,7 @@ const mainScript = `
             xhr.send(file);
 
         } catch (e) {
-            alert(e.message);
+            alert("Error: " + e.message);
             submitBtn.disabled = false; submitBtn.innerText = "Retry";
             progressContainer.classList.add('hidden');
         }
@@ -174,7 +181,7 @@ const Layout = (props: { children: any; title?: string; user?: User | null }) =>
             <script src="https://cdn.tailwindcss.com"></script>
             <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet" />
             <link href="https://fonts.googleapis.com/css2?family=Padauk:wght@400;700&display=swap" rel="stylesheet" />
-            <style>{`body { font-family: 'Padauk', sans-serif; background-color: #09090b; color: #e4e4e7; } .glass { background: rgba(39, 39, 42, 0.6); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.05); } .custom-scroll::-webkit-scrollbar { width: 6px; } .custom-scroll::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }`}</style>
+            <style>{`body { font-family: 'Padauk', sans-serif; background-color: #09090b; color: #e4e4e7; } .glass { background: rgba(39, 39, 42, 0.6); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.05); } .custom-scroll::-webkit-scrollbar { width: 6px; } .custom-scroll::-webkit-scrollbar-track { background: #18181b; } .custom-scroll::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }`}</style>
         </head>
         <body data-vip={props.user && checkVipStatus(props.user) ? "true" : "false"}>
             <nav class="fixed top-0 w-full z-50 glass border-b border-zinc-800"><div class="max-w-5xl mx-auto px-4 py-3 flex justify-between items-center"><a href="/" class="text-xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-yellow-600 italic tracking-tighter"><i class="fa-solid fa-cube text-yellow-500 mr-2"></i>GOLD STORAGE</a>{props.user ? (<div class="flex gap-3 items-center"><div class="hidden sm:flex flex-col items-end leading-tight"><span class="text-xs font-bold text-gray-300">{props.user.username}</span>{checkVipStatus(props.user) ? <span class="text-[9px] text-yellow-500 font-bold">VIP</span> : <span class="text-[9px] text-gray-500 font-bold">FREE</span>}</div>{props.user.username === ADMIN_USERNAME && <a href="/admin" class="w-8 h-8 flex items-center justify-center bg-purple-600 rounded-full"><i class="fa-solid fa-shield-halved text-xs"></i></a>}<a href="/logout" class="w-8 h-8 flex items-center justify-center bg-zinc-800 border border-zinc-700 rounded-full hover:bg-red-600/20 hover:text-red-500"><i class="fa-solid fa-power-off text-xs"></i></a></div>) : (<a href="/login" class="text-xs bg-yellow-500 text-black px-4 py-2 rounded-full font-bold hover:bg-yellow-400 transition">ဝင်မည်</a>)}</div></nav>
@@ -233,7 +240,7 @@ app.get("/", async (c) => {
     </Layout>);
 });
 
-// 🔥 API 1: GET PRESIGNED URL
+// 🔥 API 1: GET PRESIGNED URL (FORCE APPLICATION/OCTET-STREAM)
 app.post("/api/get-upload-url", async (c) => {
     try {
         const cookie = getCookie(c, "auth");
@@ -242,26 +249,29 @@ app.post("/api/get-upload-url", async (c) => {
         if(!user) return c.text("Login required", 401);
 
         const isVip = checkVipStatus(user);
-        const body = await c.req.json();
-        const { name, size, server, type } = body;
+        const { name, size, customName, server } = await c.req.json();
 
-        // Limit Check
         if (!isVip) {
             if (size > FREE_UPLOAD_LIMIT) return c.text("Free Limit Exceeded (Max 20MB)", 403);
             if (user.usedStorage + size > FREE_STORAGE_LIMIT) return c.text("Storage Full (Max 200MB)", 403);
         }
 
-        const safeName = name.replace(/[^a-zA-Z0-9.-]/g, "_");
+        let finalName = name;
+        if (customName) {
+            const ext = name.split('.').pop();
+            finalName = customName.endsWith('.' + ext) ? customName : customName + '.' + ext;
+        }
+        const safeName = finalName.replace(/[^a-zA-Z0-9.-]/g, "_");
         const r2Key = `${user.username}/${crypto.randomUUID()}-${safeName}`;
 
-        const client = getR2Client(server as "1" | "2");
+        const client = server === "1" ? s3Server1 : s3Server2;
         const bucket = Deno.env.get(`R2_${server}_BUCKET_NAME`)!;
-        const contentType = type || "application/octet-stream";
 
+        // 🔥 FORCE GENERIC CONTENT TYPE (Browser and Server must match)
         const command = new PutObjectCommand({
             Bucket: bucket,
             Key: r2Key,
-            ContentType: contentType,
+            ContentType: "application/octet-stream", 
             ContentDisposition: 'inline'
         });
 
@@ -331,7 +341,7 @@ app.get("/api/cron/cleanup", async (c) => {
 
 async function deleteFileFromR2(f: FileData) {
     const bucket = Deno.env.get(`R2_${f.server}_BUCKET_NAME`);
-    const client = getR2Client(f.server as "1" | "2");
+    const client = f.server === "1" ? s3Server1 : s3Server2;
     try { await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: f.r2Key })); } catch (e) {}
 }
 
