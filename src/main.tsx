@@ -1,4 +1,4 @@
-/** @jsxImportSource npm:hono@4/jsx */  
+/** @jsxImportSource npm:hono@4/jsx */
 import { Hono } from "npm:hono@4";
 import { getCookie, setCookie, deleteCookie } from "npm:hono@4/cookie";
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand } from "npm:@aws-sdk/client-s3";
@@ -11,7 +11,7 @@ const kv = await Deno.openKv();
 // =======================
 // 1. CONFIG
 // =======================
-const ADMIN_USERNAME = "soekyawwin"; 
+const ADMIN_USERNAME = "admin"; 
 const SECRET_KEY = Deno.env.get("SECRET_SALT") || "change-this-secret";
 
 // Storage Quota
@@ -305,7 +305,7 @@ const Layout = (props: { children: any; title?: string; user?: User | null }) =>
 )};
 
 // =======================
-// 4. MAIN ROUTES
+// 4. MAIN ROUTES (FIXED FORM ERROR)
 // =======================
 app.get("/", async (c) => {
     const cookie = getCookie(c, "auth");
@@ -341,48 +341,52 @@ app.get("/", async (c) => {
                 <button id="btn-mode-remote" onclick="switchUploadMode('remote')" class="px-4 py-2 text-xs font-bold rounded-lg bg-zinc-800 text-gray-400 hover:text-white transition"><i class="fa-solid fa-globe mr-1"></i> Remote URL {isVip ? "" : "(VIP)"}</button>
             </div>
 
-            {/* LOCAL UPLOAD */}
-            <form id="uploadForm" onsubmit="uploadLocal(event)" class="space-y-5" id="mode-local">
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
-                    <div><label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">ဖိုင်နာမည် (Optional)</label><input name="customName" placeholder="File Name..." class="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-3 text-sm focus:border-yellow-500 outline-none transition" /></div>
-                    <div>
-                        <label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">သက်တမ်း</label>
-                        {isVip ? (<select name="expiry" class="w-full bg-zinc-900 border border-yellow-600/50 rounded-xl p-3 text-sm text-yellow-500 font-bold outline-none"><option value="0">Lifetime</option><option value="7">1 Week</option><option value="30">1 Month</option></select>) : (<div class="relative"><input disabled value="30 Days (Free Limit)" class="w-full bg-zinc-900 border border-red-900/30 text-red-400 rounded-xl p-3 text-sm font-bold cursor-not-allowed" /><input type="hidden" name="expiry" value="30" /></div>)}
+            {/* LOCAL UPLOAD FORM (FIXED) */}
+            <div id="mode-local">
+                <form id="uploadForm" onsubmit="uploadLocal(event)" class="space-y-5">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+                        <div><label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">ဖိုင်နာမည် (Optional)</label><input name="customName" placeholder="File Name..." class="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-3 text-sm focus:border-yellow-500 outline-none transition" /></div>
+                        <div>
+                            <label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">သက်တမ်း</label>
+                            {isVip ? (<select name="expiry" class="w-full bg-zinc-900 border border-yellow-600/50 rounded-xl p-3 text-sm text-yellow-500 font-bold outline-none"><option value="0">Lifetime</option><option value="7">1 Week</option><option value="30">1 Month</option></select>) : (<div class="relative"><input disabled value="30 Days (Free Limit)" class="w-full bg-zinc-900 border border-red-900/30 text-red-400 rounded-xl p-3 text-sm font-bold cursor-not-allowed" /><input type="hidden" name="expiry" value="30" /></div>)}
+                        </div>
                     </div>
-                </div>
-                <div class="grid grid-cols-2 gap-4">
-                    <label class="cursor-pointer relative"><input type="radio" name="server" value="1" class="peer sr-only" checked /><div class="p-3 bg-zinc-900 border border-zinc-700 rounded-xl peer-checked:border-blue-500 peer-checked:bg-blue-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-300 peer-checked:text-white">Server 1</span></div></label>
-                    <label class="cursor-pointer relative"><input type="radio" name="server" value="2" class="peer sr-only" /><div class="p-3 bg-zinc-900 border border-zinc-700 rounded-xl peer-checked:border-yellow-500 peer-checked:bg-yellow-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-300 peer-checked:text-white">Server 2</span></div></label>
-                </div>
-                <div class="border-2 border-dashed border-zinc-700 rounded-2xl p-8 text-center hover:border-yellow-500/50 hover:bg-zinc-800/50 transition cursor-pointer group relative">
-                    <input type="file" id="fileInput" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/>
-                    <div class="space-y-2 pointer-events-none"><div class="w-12 h-12 bg-zinc-800 rounded-full flex items-center justify-center mx-auto text-zinc-400 group-hover:text-yellow-500 transition"><i id="uploadIcon" class="fa-solid fa-plus text-xl"></i></div><p id="fileNameDisplay" class="text-sm font-bold text-zinc-300 truncate px-4">Choose File</p><p class="text-[10px] text-zinc-500">{isVip ? "Unlimited" : "Limit: 50GB"}</p></div>
-                </div>
-                <div id="progressContainer" class="hidden"><div class="flex justify-between text-[10px] uppercase font-bold text-zinc-400 mb-1"><span>Uploading...</span><span id="progressText">0%</span></div><div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="progressBar" class="bg-yellow-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div></div></div>
-                <button id="submitBtn" class="w-full bg-gradient-to-r from-yellow-600 to-yellow-500 text-black font-bold py-3.5 rounded-xl shadow-lg hover:brightness-110 transition active:scale-95">တင်မည်</button>
-            </form>
+                    <div class="grid grid-cols-2 gap-4">
+                        <label class="cursor-pointer relative"><input type="radio" name="server" value="1" class="peer sr-only" checked /><div class="p-3 bg-zinc-900 border border-zinc-700 rounded-xl peer-checked:border-blue-500 peer-checked:bg-blue-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-300 peer-checked:text-white">Server 1</span></div></label>
+                        <label class="cursor-pointer relative"><input type="radio" name="server" value="2" class="peer sr-only" /><div class="p-3 bg-zinc-900 border border-zinc-700 rounded-xl peer-checked:border-yellow-500 peer-checked:bg-yellow-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-300 peer-checked:text-white">Server 2</span></div></label>
+                    </div>
+                    <div class="border-2 border-dashed border-zinc-700 rounded-2xl p-8 text-center hover:border-yellow-500/50 hover:bg-zinc-800/50 transition cursor-pointer group relative">
+                        <input type="file" id="fileInput" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/>
+                        <div class="space-y-2 pointer-events-none"><div class="w-12 h-12 bg-zinc-800 rounded-full flex items-center justify-center mx-auto text-zinc-400 group-hover:text-yellow-500 transition"><i id="uploadIcon" class="fa-solid fa-plus text-xl"></i></div><p id="fileNameDisplay" class="text-sm font-bold text-zinc-300 truncate px-4">Choose File</p><p class="text-[10px] text-zinc-500">{isVip ? "Unlimited" : "Limit: 50GB"}</p></div>
+                    </div>
+                    <div id="progressContainer" class="hidden"><div class="flex justify-between text-[10px] uppercase font-bold text-zinc-400 mb-1"><span>Uploading...</span><span id="progressText">0%</span></div><div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="progressBar" class="bg-yellow-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div></div></div>
+                    <button id="submitBtn" class="w-full bg-gradient-to-r from-yellow-600 to-yellow-500 text-black font-bold py-3.5 rounded-xl shadow-lg hover:brightness-110 transition active:scale-95">တင်မည်</button>
+                </form>
+            </div>
 
-            {/* REMOTE UPLOAD FORM */}
-            <form id="mode-remote" onsubmit="uploadRemote(event)" class="space-y-5 hidden">
-                <div><label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">Direct Video/File URL</label><input id="remoteUrl" type="url" placeholder="https://example.com/video.mp4" class="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-3 text-sm focus:border-yellow-500 outline-none transition" /></div>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
-                    <div><label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">File Name</label><input id="remoteName" placeholder="myvideo.mp4" class="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-3 text-sm focus:border-yellow-500 outline-none transition" /></div>
-                    <div><label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">Expiry</label><select name="expiry_remote" class="w-full bg-zinc-900 border border-yellow-600/50 rounded-xl p-3 text-sm text-yellow-500 font-bold outline-none"><option value="0">Lifetime</option><option value="7">1 Week</option><option value="30">1 Month</option></select></div>
-                </div>
-                <div class="grid grid-cols-2 gap-4">
-                    <label class="cursor-pointer relative"><input type="radio" name="server_remote" value="1" class="peer sr-only" checked /><div class="p-3 bg-zinc-900 border border-zinc-700 rounded-xl peer-checked:border-blue-500 peer-checked:bg-blue-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-300 peer-checked:text-white">Server 1</span></div></label>
-                    <label class="cursor-pointer relative"><input type="radio" name="server_remote" value="2" class="peer sr-only" /><div class="p-3 bg-zinc-900 border border-zinc-700 rounded-xl peer-checked:border-yellow-500 peer-checked:bg-yellow-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-300 peer-checked:text-white">Server 2</span></div></label>
-                </div>
-                <div id="progressContainerRemote" class="hidden"><div class="flex justify-between text-[10px] uppercase font-bold text-zinc-400 mb-1"><span>Processing...</span><span id="progressTextRemote">0%</span></div><div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="progressBarRemote" class="bg-yellow-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div></div></div>
-                <button id="remoteBtn" class="w-full bg-zinc-800 text-white border border-zinc-700 font-bold py-3.5 rounded-xl shadow-lg hover:bg-yellow-600 hover:text-black transition">Remote Upload (Max 1.5GB)</button>
-            </form>
+            {/* REMOTE UPLOAD FORM (VIP Logic Handled in JS) */}
+            <div id="mode-remote" class="hidden">
+                <form onsubmit="uploadRemote(event)" class="space-y-5">
+                    <div><label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">Direct Video/File URL</label><input id="remoteUrl" type="url" placeholder="https://example.com/video.mp4" class="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-3 text-sm focus:border-yellow-500 outline-none transition" /></div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+                        <div><label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">File Name</label><input id="remoteName" placeholder="myvideo.mp4" class="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-3 text-sm focus:border-yellow-500 outline-none transition" /></div>
+                        <div><label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">Expiry</label><select name="expiry_remote" class="w-full bg-zinc-900 border border-yellow-600/50 rounded-xl p-3 text-sm text-yellow-500 font-bold outline-none"><option value="0">Lifetime</option><option value="7">1 Week</option><option value="30">1 Month</option></select></div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <label class="cursor-pointer relative"><input type="radio" name="server_remote" value="1" class="peer sr-only" checked /><div class="p-3 bg-zinc-900 border border-zinc-700 rounded-xl peer-checked:border-blue-500 peer-checked:bg-blue-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-300 peer-checked:text-white">Server 1</span></div></label>
+                        <label class="cursor-pointer relative"><input type="radio" name="server_remote" value="2" class="peer sr-only" /><div class="p-3 bg-zinc-900 border border-zinc-700 rounded-xl peer-checked:border-yellow-500 peer-checked:bg-yellow-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-300 peer-checked:text-white">Server 2</span></div></label>
+                    </div>
+                    <div id="progressContainerRemote" class="hidden"><div class="flex justify-between text-[10px] uppercase font-bold text-zinc-400 mb-1"><span>Processing...</span><span id="progressTextRemote">0%</span></div><div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="progressBarRemote" class="bg-yellow-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div></div></div>
+                    <button id="remoteBtn" class="w-full bg-zinc-800 text-white border border-zinc-700 font-bold py-3.5 rounded-xl shadow-lg hover:bg-yellow-600 hover:text-black transition">Remote Upload (Max 1.5GB)</button>
+                </form>
+            </div>
         </div>
 
-        {/* File List */}
+        {/* File List & Search */}
         <div class="flex flex-col md:flex-row md:items-center justify-between mb-4 gap-4">
             <h3 class="font-bold text-white text-sm uppercase tracking-wide"><i class="fa-solid fa-list-ul mr-2 text-zinc-500"></i> My Files</h3>
             <div class="flex gap-2 w-full md:w-auto">
-                <input id="searchInput" onkeyup="filterFiles()" placeholder="Search..." class="bg-zinc-900 border border-zinc-700 text-white text-xs p-2 rounded-lg outline-none focus:border-yellow-500 w-full md:w-48" />
+                <input id="searchInput" onkeyup="filterFiles()" placeholder="Search files..." class="bg-zinc-900 border border-zinc-700 text-white text-xs p-2 rounded-lg outline-none focus:border-yellow-500 w-full md:w-48" />
                 <div class="flex bg-zinc-900 p-1 rounded-lg shrink-0">
                     <button onclick="switchTab('all')" class={`px-3 py-1 text-[10px] font-bold rounded-md transition ${filterType === 'all' ? 'bg-yellow-500 text-black' : 'text-gray-400'}`}>ALL</button>
                     <button onclick="switchTab('video')" class={`px-3 py-1 text-[10px] font-bold rounded-md transition ${filterType === 'video' ? 'bg-yellow-500 text-black' : 'text-gray-400'}`}>VID</button>
@@ -398,9 +402,13 @@ app.get("/", async (c) => {
                     const viewLink = `/d/${f.server}/${f.r2Key}?action=view`;
                     return (
                     <div class="file-item bg-zinc-800/50 hover:bg-zinc-800 p-3 rounded-xl border border-transparent hover:border-zinc-600 group transition" data-name={f.name}>
+                        {/* Mobile Layout Fix: Column on small, Row on md */}
                         <div class="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                            {/* Icon + Info */}
                             <div class="flex items-start gap-3 overflow-hidden w-full">
-                                <div class={`w-10 h-10 rounded-lg flex items-center justify-center text-lg flex-shrink-0 mt-1 ${f.type === 'image' ? 'bg-yellow-500/10 text-yellow-500' : f.type === 'video' ? 'bg-blue-500/10 text-blue-500' : 'bg-zinc-700 text-zinc-400'}`}><i class={`fa-solid ${f.type === 'image' ? 'fa-image' : f.type === 'video' ? 'fa-clapperboard' : 'fa-file'}`}></i></div>
+                                <div class={`w-10 h-10 rounded-lg flex items-center justify-center text-lg flex-shrink-0 mt-1 ${f.type === 'image' ? 'bg-yellow-500/10 text-yellow-500' : f.type === 'video' ? 'bg-blue-500/10 text-blue-500' : 'bg-zinc-700 text-zinc-400'}`}>
+                                    <i class={`fa-solid ${f.type === 'image' ? 'fa-image' : f.type === 'video' ? 'fa-clapperboard' : 'fa-file'}`}></i>
+                                </div>
                                 <div class="min-w-0 w-full">
                                     <a href={viewLink} target="_blank" class="font-bold text-sm text-zinc-200 group-hover:text-yellow-500 transition hover:underline block truncate">{f.name}</a>
                                     <div class="flex flex-wrap items-center gap-2 text-[10px] text-zinc-500 font-mono mt-1">
@@ -410,12 +418,13 @@ app.get("/", async (c) => {
                                     </div>
                                 </div>
                             </div>
+                            {/* Action Buttons */}
                             <div class="flex gap-2 w-full md:w-auto justify-end border-t border-zinc-700/50 pt-2 md:pt-0 md:border-0">
                                 {isVip && <button onclick={`openEditModal('${f.id}', '${f.name}', '${f.expiresAt}')`} class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-yellow-600 hover:text-black text-white rounded-lg transition" title="Edit Expiry"><i class="fa-solid fa-pen text-xs"></i></button>}
-                                <button onclick={`navigator.clipboard.writeText(window.location.origin + '${viewLink}'); showToast('Stream Link Copied!');`} class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-white hover:text-black text-white rounded-lg transition" title="Copy Stream Link"><i class="fa-regular fa-copy text-xs"></i></button>
+                                <button onclick={`navigator.clipboard.writeText(window.location.origin + '${viewLink}'); this.innerHTML='<i class="fa-solid fa-check text-green-500"></i>'; setTimeout(()=>this.innerHTML='<i class="fa-regular fa-copy"></i>', 1000)`} class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-white hover:text-black text-white rounded-lg transition" title="Copy Stream Link"><i class="fa-regular fa-copy text-xs"></i></button>
                                 {(f.type === 'video' || f.type === 'image') && (<a href={viewLink} target="_blank" title="Play/View" class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-blue-500 text-white rounded-lg transition"><i class={`fa-solid ${f.type === 'video' ? 'fa-play' : 'fa-eye'} text-xs`}></i></a>)}
                                 <a href={downloadLink} target="_blank" title="Download" class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-green-600 text-white rounded-lg transition"><i class="fa-solid fa-download text-xs"></i></a>
-                                <button onclick={`confirmDelete('${f.id}')`} class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-red-600 text-white rounded-lg transition"><i class="fa-solid fa-trash text-xs"></i></button>
+                                <form action={`/delete/${f.id}`} method="post" onsubmit="return confirm('ဖျက်မှာသေချာလား?')"><button class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-red-600 text-white rounded-lg transition"><i class="fa-solid fa-trash text-xs"></i></button></form>
                             </div>
                         </div>
                     </div>
