@@ -8,16 +8,16 @@ const app = new Hono();
 const kv = await Deno.openKv();
 
 // =======================
-// 1. CONFIG (ပြင်ဆင်ရန်)
+// 1. CONFIG
 // =======================
-const ADMIN_USERNAME = "soekyawwin"; // <--- ဒီနေရာမှာ အစ်ကို့ Username ထည့်ပါ
-const SECRET_KEY = Deno.env.get("SECRET_SALT") || "my-super-secret-salt-key-2024";
+const ADMIN_USERNAME = "soekyawwin"; // <--- ဒီနေရာမှာ Admin Username ပြင်ပါ
+const SECRET_KEY = Deno.env.get("SECRET_SALT") || "change-this-secret-key-to-something-long";
 
 // Storage Quota
-const FREE_STORAGE_LIMIT = 200 * 1024 * 1024; // 200 MB
-const VIP_STORAGE_LIMIT = 100 * 1024 * 1024 * 1024; // 100 GB (Direct Upload မို့ များများပေးလို့ရပြီ)
+const FREE_STORAGE_LIMIT = 50 * 1024 * 1024 * 1024; // 50 GB (Free User)
+const VIP_STORAGE_LIMIT = 100 * 1024 * 1024 * 1024; // 100 GB (VIP User)
 
-// S3 Setup
+// S3 Clients
 const s3Server1 = new S3Client({
   region: "auto",
   endpoint: `https://${Deno.env.get("R2_1_ACCOUNT_ID")}.r2.cloudflarestorage.com`,
@@ -37,12 +37,11 @@ const s3Server2 = new S3Client({
 });
 
 // =======================
-// 2. HELPERS (Logic)
+// 2. HELPERS (Security & Types)
 // =======================
 interface User { username: string; passwordHash: string; isVip: boolean; vipExpiry?: number; usedStorage: number; createdAt: number; }
 interface FileData { id: string; name: string; sizeBytes: number; size: string; server: "1" | "2"; r2Key: string; uploadedAt: number; expiresAt: number; type: "image" | "video" | "other"; isVipFile: boolean; }
 
-// Advanced Security Hashing (PBKDF2)
 async function hashPassword(password: string) {
     const enc = new TextEncoder();
     const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(password), { name: "PBKDF2" }, false, ["deriveBits", "deriveKey"]);
@@ -59,7 +58,7 @@ function checkVipStatus(user: User): boolean { return user.vipExpiry ? user.vipE
 function formatDate(ts: number) { return new Date(ts).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }); }
 
 // =======================
-// 3. FRONTEND UI & SCRIPTS
+// 3. FRONTEND UI
 // =======================
 const mainScript = `
 <script>
@@ -141,7 +140,12 @@ const mainScript = `
                     await fetch("/api/upload/complete", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ key, fileId, server: formData.get("server") })
+                        body: JSON.stringify({ 
+                            key, 
+                            fileId, 
+                            server: formData.get("server"),
+                            expiry: formData.get("expiry") 
+                        })
                     });
                     
                     progressBar.classList.add('bg-green-500');
@@ -194,7 +198,6 @@ app.get("/", async (c) => {
     const filterType = c.req.query('type') || 'all';
     const cursor = c.req.query('cursor');
 
-    // Pagination: Load 20 files at a time
     const iter = kv.list<FileData>({ prefix: ["files", user.username] }, { reverse: true, limit: 20, cursor: cursor });
     const files = [];
     let nextCursor = "";
@@ -204,15 +207,15 @@ app.get("/", async (c) => {
         nextCursor = res.cursor;
     }
 
-    const totalMB = (user.usedStorage / 1024 / 1024).toFixed(2);
+    const totalGB = (user.usedStorage / 1024 / 1024 / 1024).toFixed(2);
     const limitBytes = isVip ? VIP_STORAGE_LIMIT : FREE_STORAGE_LIMIT; 
-    const displayLimit = isVip ? "100 GB" : "200 MB";
+    const displayLimit = isVip ? "100 GB" : "50 GB";
     const usedPercent = Math.min(100, (user.usedStorage / limitBytes) * 100);
 
     return c.html(<Layout user={user}>
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
             <div class="glass p-5 rounded-2xl relative overflow-hidden group"><p class="text-xs text-zinc-400 uppercase font-bold mb-1">အကောင့်</p><p class={`text-2xl font-black ${isVip ? 'text-yellow-500' : 'text-zinc-300'}`}>{isVip ? "VIP PRO" : "Free Plan"}</p>{isVip && user.vipExpiry && <p class="text-[10px] text-green-400 mt-2 font-mono bg-green-900/20 inline-block px-2 py-1 rounded">EXP: {formatDate(user.vipExpiry)}</p>}<a href="/change-password" class="absolute bottom-4 right-4 text-xs text-zinc-500 hover:text-white transition"><i class="fa-solid fa-key mr-1"></i> Pass</a></div>
-            <div class="glass p-5 rounded-2xl relative"><div class="flex justify-between items-end mb-2"><div><p class="text-xs text-zinc-400 uppercase font-bold">Storage</p><p class="text-xl font-bold text-white">{totalMB} <span class="text-sm text-zinc-500">/ {displayLimit}</span></p></div><span class="text-2xl font-black text-zinc-600">{usedPercent.toFixed(0)}%</span></div><div class="w-full bg-zinc-800 rounded-full h-3 overflow-hidden"><div class={`h-full rounded-full ${isVip ? 'bg-gradient-to-r from-yellow-600 to-yellow-400' : 'bg-zinc-500'}`} style={`width: ${usedPercent}%`}></div></div></div>
+            <div class="glass p-5 rounded-2xl relative"><div class="flex justify-between items-end mb-2"><div><p class="text-xs text-zinc-400 uppercase font-bold">Storage</p><p class="text-xl font-bold text-white">{totalGB} <span class="text-sm text-zinc-500">GB / {displayLimit}</span></p></div><span class="text-2xl font-black text-zinc-600">{usedPercent.toFixed(0)}%</span></div><div class="w-full bg-zinc-800 rounded-full h-3 overflow-hidden"><div class={`h-full rounded-full ${isVip ? 'bg-gradient-to-r from-yellow-600 to-yellow-400' : 'bg-zinc-500'}`} style={`width: ${usedPercent}%`}></div></div></div>
             <div class="glass p-5 rounded-2xl flex items-center justify-between"><div><p class="text-xs text-zinc-400 uppercase font-bold">Status</p><p class="text-sm font-bold text-green-500">Active</p></div><div class="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-500 text-2xl"><i class="fa-solid fa-signal"></i></div></div>
         </div>
         
@@ -221,7 +224,22 @@ app.get("/", async (c) => {
             <form id="uploadForm" onsubmit="uploadFile(event)" class="space-y-5">
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
                     <div><label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">ဖိုင်နာမည် (Optional)</label><input name="customName" placeholder="File Name..." class="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-3 text-sm focus:border-yellow-500 outline-none transition" /></div>
-                    <div><label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">သက်တမ်း</label>{isVip ? (<select name="expiry" class="w-full bg-zinc-900 border border-yellow-600/50 rounded-xl p-3 text-sm text-yellow-500 font-bold outline-none"><option value="0">Lifetime (မဖျက်ပါ)</option><option value="7">1 Week</option><option value="30">1 Month</option></select>) : (<div class="relative"><input disabled value="1 Month (Free Limit)" class="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-3 text-sm text-zinc-500 cursor-not-allowed" /><input type="hidden" name="expiry" value="30" /><i class="fa-solid fa-lock absolute right-4 top-3.5 text-zinc-600"></i></div>)}</div>
+                    <div>
+                        <label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">သက်တမ်း</label>
+                        {isVip ? (
+                            <select name="expiry" class="w-full bg-zinc-900 border border-yellow-600/50 rounded-xl p-3 text-sm text-yellow-500 font-bold outline-none">
+                                <option value="0">Lifetime (မဖျက်ပါ)</option>
+                                <option value="7">1 Week</option>
+                                <option value="30">1 Month</option>
+                            </select>
+                        ) : (
+                            <div class="relative">
+                                <input disabled value="30 Days (Auto Delete)" class="w-full bg-zinc-900 border border-red-900/30 text-red-400 rounded-xl p-3 text-sm font-bold cursor-not-allowed" />
+                                <input type="hidden" name="expiry" value="30" />
+                                <span class="absolute right-4 top-3.5 text-[10px] text-zinc-500">Free Plan Limit</span>
+                            </div>
+                        )}
+                    </div>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <label class="cursor-pointer relative"><input type="radio" name="server" value="1" class="peer sr-only" checked /><div class="p-3 bg-zinc-900 border border-zinc-700 rounded-xl peer-checked:border-blue-500 peer-checked:bg-blue-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-300 peer-checked:text-white">Server 1</span></div></label>
@@ -229,7 +247,7 @@ app.get("/", async (c) => {
                 </div>
                 <div class="border-2 border-dashed border-zinc-700 rounded-2xl p-8 text-center hover:border-yellow-500/50 hover:bg-zinc-800/50 transition cursor-pointer group relative">
                     <input type="file" id="fileInput" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/>
-                    <div class="space-y-2 pointer-events-none"><div class="w-12 h-12 bg-zinc-800 rounded-full flex items-center justify-center mx-auto text-zinc-400 group-hover:text-yellow-500 transition"><i id="uploadIcon" class="fa-solid fa-plus text-xl"></i></div><p id="fileNameDisplay" class="text-sm font-bold text-zinc-300 truncate px-4">ဖိုင်ရွေးချယ်ရန် နှိပ်ပါ</p><p class="text-[10px] text-zinc-500">{isVip ? "Unlimited Size (VIP)" : "Max Size: 200MB"}</p></div>
+                    <div class="space-y-2 pointer-events-none"><div class="w-12 h-12 bg-zinc-800 rounded-full flex items-center justify-center mx-auto text-zinc-400 group-hover:text-yellow-500 transition"><i id="uploadIcon" class="fa-solid fa-plus text-xl"></i></div><p id="fileNameDisplay" class="text-sm font-bold text-zinc-300 truncate px-4">ဖိုင်ရွေးချယ်ရန် နှိပ်ပါ</p><p class="text-[10px] text-zinc-500">{isVip ? "Unlimited Upload (VIP)" : "Limit: 50GB Total"}</p></div>
                 </div>
                 <div id="progressContainer" class="hidden"><div class="flex justify-between text-[10px] uppercase font-bold text-zinc-400 mb-1"><span>Uploading...</span><span id="progressText">0%</span></div><div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="progressBar" class="bg-yellow-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div></div></div>
                 <button id="submitBtn" class="w-full bg-gradient-to-r from-yellow-600 to-yellow-500 text-black font-bold py-3.5 rounded-xl shadow-lg hover:brightness-110 transition active:scale-95">တင်မည်</button>
@@ -271,7 +289,7 @@ app.post("/api/upload/presign", async (c) => {
     const user = await getUser(cookie);
     if(!user) return c.json({error: "Login required"}, 401);
 
-    const { name, size, server, type, customName, expiry } = await c.req.json();
+    const { name, size, server, type, customName } = await c.req.json();
     const isVip = checkVipStatus(user);
     const limitBytes = isVip ? VIP_STORAGE_LIMIT : FREE_STORAGE_LIMIT;
 
@@ -290,7 +308,7 @@ app.post("/api/upload/presign", async (c) => {
     const bucket = server === "1" ? Deno.env.get("R2_1_BUCKET_NAME") : Deno.env.get("R2_2_BUCKET_NAME");
 
     const command = new PutObjectCommand({ Bucket: bucket, Key: r2Key, ContentType: type });
-    const url = await getSignedUrl(client, command, { expiresIn: 900 }); // 15 mins upload window
+    const url = await getSignedUrl(client, command, { expiresIn: 900 });
 
     return c.json({ url, key: r2Key, fileId });
 });
@@ -300,8 +318,12 @@ app.post("/api/upload/complete", async (c) => {
     const user = await getUser(cookie || "");
     if(!user) return c.json({error: "Unauthorized"}, 401);
 
-    const { key, fileId, server } = await c.req.json();
+    const { key, fileId, server, expiry } = await c.req.json();
     const isVip = checkVipStatus(user);
+    
+    // Logic: Free users forced to 30 days. VIP can choose (0 = lifetime).
+    const expiryDays = isVip ? (parseInt(expiry) || 0) : 30;
+
     const client = server === "1" ? s3Server1 : s3Server2;
     const bucket = server === "1" ? Deno.env.get("R2_1_BUCKET_NAME") : Deno.env.get("R2_2_BUCKET_NAME");
 
@@ -310,9 +332,6 @@ app.post("/api/upload/complete", async (c) => {
         const sizeBytes = head.ContentLength || 0;
         const fileName = key.split("-").slice(1).join("-");
         const type = head.ContentType?.startsWith("image/") ? "image" : head.ContentType?.startsWith("video/") ? "video" : "other";
-        
-        let expiryDays = 30; // Free default
-        if (isVip) expiryDays = 0; // VIP default (Lifetime) - logic simplifed
 
         const fileData: FileData = {
             id: fileId, name: fileName, sizeBytes: sizeBytes, size: (sizeBytes / 1024 / 1024).toFixed(2) + " MB",
@@ -321,7 +340,7 @@ app.post("/api/upload/complete", async (c) => {
             type: type, isVipFile: isVip
         };
 
-        const res = await kv.atomic()
+        await kv.atomic()
             .set(["files", user.username, fileId], fileData)
             .set(["users", user.username], { ...user, usedStorage: user.usedStorage + sizeBytes })
             .commit();
@@ -343,110 +362,52 @@ app.get("/d/:server/*", async (c) => {
 
     try {
         const command = new GetObjectCommand({ Bucket: bucket, Key: rawKey, ResponseContentDisposition: 'attachment' });
-        const url = await getSignedUrl(client, command, { expiresIn: 3600 }); // 1 Hour Link
+        const url = await getSignedUrl(client, command, { expiresIn: 3600 });
         return c.redirect(url);
     } catch (e) { return c.text("File Not Found", 404); }
 });
 
 // =======================
-// 7. ADMIN PANEL (MOBILE RESPONSIVE FIX)
+// 7. ADMIN PANEL (Mobile Responsive & Inspector)
 // =======================
 app.get("/admin", async (c) => { 
     const cookie = getCookie(c, "auth"); 
     const currentUser = await getUser(cookie || "");
-    
-    // Check Admin
     if(!currentUser || currentUser.username !== ADMIN_USERNAME) return c.redirect("/"); 
 
     const iter = kv.list<User>({ prefix: ["users"] }); 
     const users = []; 
     let totalStorage = 0;
-    
-    for await (const res of iter) { 
-        users.push(res.value); 
-        totalStorage += res.value.usedStorage;
-    }
-    
+    for await (const res of iter) { users.push(res.value); totalStorage += res.value.usedStorage; }
     const totalGB = (totalStorage / 1024 / 1024 / 1024).toFixed(2);
 
     return c.html(
     <Layout title="Admin Panel" user={currentUser}>
         <div class="space-y-6">
-            
-            {/* Dashboard Stats (Grid 2 ခုခွဲထားလိုက်တာ ဖုန်းမှာကြည့်ကောင်းသွားမယ်) */}
             <div class="grid grid-cols-2 gap-3">
-                <div class="glass p-4 rounded-xl border-l-4 border-yellow-500 relative">
-                    <p class="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Total Users</p>
-                    <p class="text-2xl font-black mt-1">{users.length}</p>
-                    <i class="fa-solid fa-users absolute top-4 right-4 text-zinc-700 text-xl"></i>
-                </div>
-                <div class="glass p-4 rounded-xl border-l-4 border-blue-500 relative">
-                    <p class="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Storage Used</p>
-                    <p class="text-2xl font-black mt-1">{totalGB} <span class="text-sm font-normal text-gray-500">GB</span></p>
-                    <i class="fa-solid fa-server absolute top-4 right-4 text-zinc-700 text-xl"></i>
-                </div>
+                <div class="glass p-4 rounded-xl border-l-4 border-yellow-500 relative"><p class="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Total Users</p><p class="text-2xl font-black mt-1">{users.length}</p></div>
+                <div class="glass p-4 rounded-xl border-l-4 border-blue-500 relative"><p class="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Storage Used</p><p class="text-2xl font-black mt-1">{totalGB} <span class="text-sm font-normal text-gray-500">GB</span></p></div>
             </div>
-
-            {/* User Manager Table (Mobile Responsive Scroll) */}
             <div class="glass rounded-xl overflow-hidden border border-zinc-700/50">
-                <div class="bg-zinc-800/50 px-4 py-3 border-b border-zinc-700 flex items-center justify-between">
-                    <h3 class="font-bold text-white text-sm"><i class="fa-solid fa-users-gear mr-2 text-yellow-500"></i> User Manager</h3>
-                    <span class="text-[10px] text-gray-500 bg-zinc-900 px-2 py-1 rounded">Scroll >></span>
-                </div>
-                
-                {/* ဒီနေရာမှာ overflow-x-auto ထည့်လိုက်လို့ ဖုန်းနဲ့ဆို ဘေးကိုဆွဲကြည့်လို့ရသွားပြီ */}
+                <div class="bg-zinc-800/50 px-4 py-3 border-b border-zinc-700 flex items-center justify-between"><h3 class="font-bold text-white text-sm">User Manager</h3><span class="text-[10px] text-gray-500 bg-zinc-900 px-2 py-1 rounded">Scroll >></span></div>
                 <div class="overflow-x-auto w-full">
                     <table class="w-full text-left text-sm text-gray-400 min-w-[600px]"> 
                         <thead class="bg-zinc-900 text-[10px] uppercase font-bold text-gray-300 tracking-wider">
-                            <tr>
-                                <th class="px-4 py-3">User</th>
-                                <th class="px-4 py-3">Storage</th>
-                                <th class="px-4 py-3">Status</th>
-                                <th class="px-4 py-3 text-center">VIP & Actions</th>
-                            </tr>
+                            <tr><th class="px-4 py-3">User</th><th class="px-4 py-3">Storage</th><th class="px-4 py-3">Status</th><th class="px-4 py-3 text-center">Actions</th></tr>
                         </thead>
                         <tbody class="divide-y divide-zinc-700/50">
                             {users.map(u => (
                                 <tr class="hover:bg-zinc-800/40 transition">
-                                    <td class="px-4 py-3 font-bold text-white">
-                                        <div class="flex items-center gap-2">
-                                            <div class="w-6 h-6 rounded-full bg-zinc-700 flex items-center justify-center text-[10px]">{u.username.charAt(0).toUpperCase()}</div>
-                                            {u.username}
-                                        </div>
-                                    </td>
+                                    <td class="px-4 py-3 font-bold text-white">{u.username}</td>
                                     <td class="px-4 py-3 text-xs font-mono">{(u.usedStorage/1024/1024).toFixed(2)} MB</td>
-                                    <td class="px-4 py-3">
-                                        {checkVipStatus(u) ? 
-                                            <span class="bg-yellow-500/10 text-yellow-500 px-2 py-0.5 rounded text-[10px] font-bold border border-yellow-500/20">VIP</span> : 
-                                            <span class="bg-zinc-700/50 text-zinc-400 px-2 py-0.5 rounded text-[10px]">Free</span>
-                                        }
-                                    </td>
+                                    <td class="px-4 py-3">{checkVipStatus(u) ? <span class="bg-yellow-500/10 text-yellow-500 px-2 py-0.5 rounded text-[10px] font-bold">VIP</span> : <span class="bg-zinc-700/50 px-2 py-0.5 rounded text-[10px]">Free</span>}</td>
                                     <td class="px-4 py-3 flex items-center justify-center gap-2">
-                                        {/* VIP Control */}
-                                        <form action="/admin/vip" method="post">
-                                            <input type="hidden" name="username" value={u.username} />
-                                            <select name="days" onchange="this.form.submit()" class="bg-black/40 border border-zinc-600 rounded text-[10px] py-1 px-2 outline-none focus:border-yellow-500 text-gray-300">
-                                                <option value="">Add VIP...</option>
-                                                <option value="30">1 Month</option>
-                                                <option value="150">5 Months</option>
-                                                <option value="365">1 Year</option>
-                                                <option value="-1">Remove VIP</option>
-                                            </select>
-                                        </form>
-
-                                        {/* Actions */}
-                                        {u.username !== ADMIN_USERNAME && (
-                                            <div class="flex gap-1">
-                                                <form action="/admin/delete-user" method="post" onsubmit="return confirm('အကောင့်ရော ဖိုင်တွေပါ အကုန်ဖျက်မှာလား?')">
-                                                    <input type="hidden" name="username" value={u.username} />
-                                                    <button class="w-6 h-6 flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white rounded transition"><i class="fa-solid fa-trash text-[10px]"></i></button>
-                                                </form>
-                                                <form action="/admin/reset-pass" method="post" onsubmit="return confirm('Password ကို 123456 ပြောင်းမှာလား?')">
-                                                    <input type="hidden" name="username" value={u.username} />
-                                                    <button class="w-6 h-6 flex items-center justify-center bg-blue-500/10 text-blue-500 hover:bg-blue-500 hover:text-white rounded transition"><i class="fa-solid fa-key text-[10px]"></i></button>
-                                                </form>
-                                            </div>
-                                        )}
+                                        <a href={`/admin/files/${u.username}`} class="w-6 h-6 flex items-center justify-center bg-zinc-700 hover:bg-white hover:text-black rounded transition"><i class="fa-solid fa-folder-open text-[10px]"></i></a>
+                                        <form action="/admin/vip" method="post"><input type="hidden" name="username" value={u.username} /><select name="days" onchange="this.form.submit()" class="bg-black/40 border border-zinc-600 rounded text-[10px] py-1 px-2 outline-none w-20"><option value="">VIP...</option><option value="30">1 Mo</option><option value="150">5 Mo</option><option value="365">1 Yr</option><option value="-1">Rm</option></select></form>
+                                        {u.username !== ADMIN_USERNAME && <div class="flex gap-1">
+                                            <form action="/admin/delete-user" method="post" onsubmit="return confirm('Delete user & files?')"><input type="hidden" name="username" value={u.username} /><button class="w-6 h-6 flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white rounded"><i class="fa-solid fa-trash text-[10px]"></i></button></form>
+                                            <form action="/admin/reset-pass" method="post" onsubmit="return confirm('Reset pass to 123456?')"><input type="hidden" name="username" value={u.username} /><button class="w-6 h-6 flex items-center justify-center bg-blue-500/10 text-blue-500 hover:bg-blue-500 hover:text-white rounded"><i class="fa-solid fa-key text-[10px]"></i></button></form>
+                                        </div>}
                                     </td>
                                 </tr>
                             ))}
@@ -458,6 +419,40 @@ app.get("/admin", async (c) => {
     </Layout>); 
 });
 
+app.get("/admin/files/:username", async (c) => {
+    const cookie = getCookie(c, "auth");
+    const admin = await getUser(cookie || "");
+    if(admin?.username !== ADMIN_USERNAME) return c.redirect("/");
+
+    const targetUser = c.req.param("username");
+    const iter = kv.list<FileData>({ prefix: ["files", targetUser] }, { reverse: true, limit: 100 });
+    const files = [];
+    for await (const res of iter) files.push(res.value);
+
+    return c.html(
+        <Layout title={`Files: ${targetUser}`} user={admin}>
+            <div class="flex items-center justify-between mb-6"><h2 class="text-xl font-bold text-white"><span class="text-yellow-500">{targetUser}</span>'s Files</h2><a href="/admin" class="bg-zinc-800 px-4 py-2 rounded-lg text-sm hover:bg-zinc-700">Back</a></div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {files.map(f => (
+                    <div class="glass p-3 rounded-xl group relative">
+                        <div class="h-24 bg-zinc-900/50 rounded-lg flex items-center justify-center mb-2 overflow-hidden relative">
+                            {f.type === 'image' ? (<img src={`/d/${f.server}/${f.r2Key}`} class="w-full h-full object-cover opacity-70 group-hover:opacity-100 transition" />) : (<i class={`fa-solid ${f.type === 'video' ? 'fa-clapperboard text-blue-500' : 'fa-file text-zinc-600'} text-3xl`}></i>)}
+                        </div>
+                        <p class="text-xs font-bold text-white truncate">{f.name}</p>
+                        <p class="text-[10px] text-zinc-500">{f.size} • {f.expiresAt ? formatDate(f.expiresAt) : "Lifetime"}</p>
+                        <div class="absolute inset-0 bg-black/80 flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition rounded-xl">
+                            <a href={`/d/${f.server}/${f.r2Key}`} target="_blank" class="w-8 h-8 flex items-center justify-center bg-blue-600 text-white rounded-full"><i class="fa-solid fa-download text-xs"></i></a>
+                            <form action={`/delete/${f.id}`} method="post" onsubmit="return confirm('Delete file?')"><button class="w-8 h-8 flex items-center justify-center bg-red-600 text-white rounded-full"><i class="fa-solid fa-trash text-xs"></i></button></form>
+                        </div>
+                    </div>
+                ))}
+            </div>
+            {files.length === 0 && <p class="text-center text-zinc-500 mt-10">No files found.</p>}
+        </Layout>
+    );
+});
+
+// Admin Actions
 app.post("/admin/vip", async (c) => { 
     const cookie = getCookie(c, "auth"); const admin = await getUser(cookie || ""); if(admin?.username !== ADMIN_USERNAME) return c.text("403"); 
     const { username, days } = await c.req.parseBody(); const user = await getUser(String(username)); 
@@ -469,7 +464,6 @@ app.post("/admin/vip", async (c) => {
     } 
     return c.redirect("/admin"); 
 });
-
 app.post("/admin/delete-user", async (c) => {
     const cookie = getCookie(c, "auth"); const admin = await getUser(cookie || ""); if(admin?.username !== ADMIN_USERNAME) return c.text("403");
     const { username } = await c.req.parseBody(); const targetUser = String(username);
@@ -478,7 +472,6 @@ app.post("/admin/delete-user", async (c) => {
     await kv.delete(["users", targetUser]);
     return c.redirect("/admin");
 });
-
 app.post("/admin/reset-pass", async (c) => {
     const cookie = getCookie(c, "auth"); const admin = await getUser(cookie || ""); if(admin?.username !== ADMIN_USERNAME) return c.text("403");
     const { username } = await c.req.parseBody(); const user = await getUser(String(username));
@@ -503,20 +496,19 @@ app.post("/delete/:id", async (c) => {
 });
 
 // =======================
-// 8. AUTH ROUTES
+// 8. AUTH
 // =======================
 app.get("/login", (c) => c.html(<Layout title="Login"><div class="max-w-sm mx-auto mt-24 glass p-8 rounded-2xl border border-zinc-700"><h1 class="text-3xl font-black mb-2 text-center text-yellow-500 italic">GOLD STORAGE</h1><form action="/login" method="post" class="space-y-4"><input name="username" placeholder="Username" required class="w-full bg-zinc-900 border border-zinc-700 p-3 rounded-xl text-white" /><input type="password" name="password" placeholder="Password" required class="w-full bg-zinc-900 border border-zinc-700 p-3 rounded-xl text-white" /><button class="w-full bg-gradient-to-r from-yellow-600 to-yellow-500 text-black font-bold py-3 rounded-xl hover:brightness-110">ဝင်မည်</button></form><p class="text-center text-xs mt-6 text-zinc-500">အကောင့်မရှိဘူးလား? <a href="/register" class="text-yellow-500 font-bold hover:underline">အကောင့်သစ်ဖွင့်မယ်</a></p></div></Layout>));
 app.post("/login", async (c) => { 
     const { username, password } = await c.req.parseBody(); const u = String(username).trim(); const user = await getUser(u); 
     if (user && user.passwordHash === await hashPassword(String(password).trim())) { 
-        setCookie(c, "auth", u, { path: "/", httpOnly: true, secure: true, sameSite: "Strict", maxAge: 86400 * 30 }); 
-        return c.redirect("/"); 
+        setCookie(c, "auth", u, { path: "/", httpOnly: true, secure: true, sameSite: "Strict", maxAge: 86400 * 30 }); return c.redirect("/"); 
     } 
-    return c.html(<Layout><p class="text-center text-red-500 mt-20">မှားယွင်းနေပါသည်။</p></Layout>); 
+    return c.html(<Layout><p class="text-center text-red-500 mt-20">Login Failed.</p></Layout>); 
 });
 app.get("/register", (c) => c.html(<Layout title="Register"><div class="max-w-sm mx-auto mt-24 glass p-8 rounded-2xl border border-zinc-700"><h1 class="text-xl font-bold mb-6 text-center text-white">အကောင့်သစ်ဖွင့်မည်</h1><form action="/register" method="post" class="space-y-4"><input name="username" placeholder="Username" required class="w-full bg-zinc-900 border border-zinc-700 p-3 rounded-xl text-white" /><input type="password" name="password" placeholder="Password" required class="w-full bg-zinc-900 border border-zinc-700 p-3 rounded-xl text-white" /><button class="w-full bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">စာရင်းသွင်းမည်</button></form></div></Layout>));
 app.post("/register", async (c) => { 
-    const { username, password } = await c.req.parseBody(); const u = String(username).trim(); if (await getUser(u)) return c.html(<Layout><p class="text-center text-red-500 mt-20">Username ရှိပြီးသားဖြစ်နေသည်။</p></Layout>); 
+    const { username, password } = await c.req.parseBody(); const u = String(username).trim(); if (await getUser(u)) return c.html(<Layout><p class="text-center text-red-500 mt-20">Username Taken.</p></Layout>); 
     const newUser: User = { username: u, passwordHash: await hashPassword(String(password)), isVip: false, usedStorage: 0, createdAt: Date.now() }; 
     await kv.set(["users", u], newUser); return c.redirect("/login"); 
 });
@@ -524,9 +516,29 @@ app.get("/logout", (c) => { deleteCookie(c, "auth"); return c.redirect("/login")
 app.get("/change-password", (c) => c.html(<Layout title="Change Password"><div class="max-w-sm mx-auto mt-20 glass p-8 rounded-xl"><h1 class="text-xl font-bold mb-4">စကားဝှက်ပြောင်းမည်</h1><form action="/change-password" method="post" class="space-y-4"><input type="password" name="newpass" placeholder="New Password" required class="w-full bg-zinc-900 border border-zinc-700 p-3 rounded-xl text-white" /><button class="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded-xl font-bold">အတည်ပြုမည်</button></form><a href="/" class="block text-center mt-4 text-xs text-gray-400">Back</a></div></Layout>));
 app.post("/change-password", async (c) => { 
     const cookie = getCookie(c, "auth"); const user = await getUser(cookie || ""); if(!user) return c.redirect("/login"); 
-    const { newpass } = await c.req.parseBody(); if(String(newpass).length < 6) return c.text("Password too short"); 
+    const { newpass } = await c.req.parseBody(); if(String(newpass).length < 6) return c.text("Min 6 chars"); 
     user.passwordHash = await hashPassword(String(newpass)); await kv.set(["users", user.username], user); 
     return c.html(<Layout><div class="text-center mt-20"><p class="text-green-500 text-xl font-bold mb-4">Success!</p><a href="/" class="bg-zinc-800 px-4 py-2 rounded-lg text-sm">Home</a></div></Layout>); 
+});
+
+// =======================
+// 9. CRON: AUTO CLEANUP
+// =======================
+Deno.cron("Cleanup", "0 * * * *", async () => {
+    const now = Date.now();
+    const iter = kv.list<FileData>({ prefix: ["files"] });
+    for await (const entry of iter) {
+        const file = entry.value;
+        if (file.expiresAt > 0 && file.expiresAt < now) {
+            await deleteFileFromR2(file);
+            const username = entry.key[1] as string;
+            const uRes = await kv.get<User>(["users", username]);
+            if (uRes.value) {
+                const u = uRes.value;
+                await kv.atomic().delete(entry.key).set(["users", username], { ...u, usedStorage: Math.max(0, u.usedStorage - file.sizeBytes) }).commit();
+            } else { await kv.delete(entry.key); }
+        }
+    }
 });
 
 Deno.serve(app.fetch);
