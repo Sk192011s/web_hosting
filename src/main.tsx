@@ -7,11 +7,12 @@ const app = new Hono();
 const kv = await Deno.openKv();
 
 // =======================
-// 1. CONFIG & R2 CLIENTS
+// 1. CONFIG & CONSTANTS
 // =======================
 const ADMIN_USERNAME = "admin";
 const SALT = "my-secret-salt";
-const GRACE_PERIOD_DAYS = 7; // VIP ကုန်ပြီး ၇ ရက်နေရင် ဖိုင်ဖျက်မည်
+const FREE_STORAGE_LIMIT = 200 * 1024 * 1024; // 200 MB
+const FREE_UPLOAD_LIMIT = 20 * 1024 * 1024;   // 20 MB
 
 const s3Server1 = new S3Client({
   region: "auto",
@@ -41,8 +42,7 @@ interface User {
     username: string; 
     passwordHash: string; 
     isVip: boolean;
-    vipExpiry?: number; // VIP ကုန်ဆုံးမည့်ရက်
-    storageLimit: number; 
+    vipExpiry?: number;
     usedStorage: number;
     createdAt: number;
 }
@@ -56,9 +56,9 @@ interface FileData {
     r2Key: string;
     downloadUrl: string; 
     uploadedAt: number;
-    expiresAt: number; // 0 = Lifetime
+    expiresAt: number;
     type: "image" | "video" | "other";
-    isVipFile: boolean; // VIP အနေနဲ့ တင်ထားတာလား
+    isVipFile: boolean;
 }
 
 async function hashPassword(text: string) {
@@ -73,21 +73,33 @@ async function getUser(username: string) {
     return res.value; 
 }
 
-// VIP စစ်ဆေးခြင်း (ရက်ကျန်သေးလား)
 function checkVipStatus(user: User): boolean {
     if (!user.vipExpiry) return false;
     return user.vipExpiry > Date.now();
 }
 
+// 🔥 DATE FORMATTER (13 Jan 2026)
+function formatDate(ts: number) {
+    return new Date(ts).toLocaleDateString('en-GB', {
+        day: 'numeric', month: 'short', year: 'numeric'
+    });
+}
+
 // =======================
-// 3. UI SCRIPTS
+// 3. UI SCRIPTS & STYLES
 // =======================
 const mainScript = `
 <script>
     function switchTab(tab) {
         document.querySelectorAll('.file-item').forEach(el => el.classList.add('hidden'));
-        document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('text-yellow-500', 'border-yellow-500'));
-        document.getElementById('btn-' + tab).classList.add('text-yellow-500', 'border-yellow-500');
+        document.querySelectorAll('.tab-btn').forEach(el => {
+            el.classList.remove('bg-yellow-500', 'text-black');
+            el.classList.add('bg-zinc-800', 'text-gray-400');
+        });
+        
+        document.getElementById('btn-' + tab).classList.remove('bg-zinc-800', 'text-gray-400');
+        document.getElementById('btn-' + tab).classList.add('bg-yellow-500', 'text-black');
+        
         if(tab === 'all') document.querySelectorAll('.file-item').forEach(el => el.classList.remove('hidden'));
         else document.querySelectorAll('.type-' + tab).forEach(el => el.classList.remove('hidden'));
     }
@@ -96,7 +108,16 @@ const mainScript = `
         event.preventDefault();
         const form = document.getElementById('uploadForm');
         const fileInput = document.getElementById('fileInput');
+        
         if(fileInput.files.length === 0) { alert("ဖိုင်ရွေးပါ"); return; }
+
+        // Front-end Limit Check (For UX)
+        const isVip = document.body.dataset.vip === "true";
+        const file = fileInput.files[0];
+        if(!isVip && file.size > 20 * 1024 * 1024) {
+            alert("Free User များသည် 20MB အောက်ဖိုင်များကိုသာ တင်ခွင့်ရှိသည်။");
+            return;
+        }
 
         const formData = new FormData(form);
         const xhr = new XMLHttpRequest();
@@ -108,7 +129,7 @@ const mainScript = `
 
         progressContainer.classList.remove('hidden');
         submitBtn.disabled = true;
-        submitBtn.innerText = "Upload နေသည်...";
+        submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Uploading...';
 
         xhr.upload.addEventListener("progress", (e) => {
             if (e.lengthComputable) {
@@ -120,13 +141,14 @@ const mainScript = `
 
         xhr.onload = () => {
             if (xhr.status === 200) {
+                progressBar.classList.remove('bg-yellow-500');
                 progressBar.classList.add('bg-green-500');
-                submitBtn.innerText = "ပြီးပါပြီ!";
-                window.location.reload();
+                submitBtn.innerHTML = '<i class="fa-solid fa-check"></i> ပြီးပါပြီ!';
+                setTimeout(() => window.location.reload(), 1000);
             } else {
-                alert("Error: " + xhr.responseText);
+                alert("Upload Failed: " + xhr.responseText);
                 submitBtn.disabled = false;
-                submitBtn.innerText = "Upload";
+                submitBtn.innerText = "တင်မည်";
                 progressContainer.classList.add('hidden');
             }
         };
@@ -145,36 +167,47 @@ const Layout = (props: { children: any; title?: string; user?: User | null }) =>
             <script src="https://cdn.tailwindcss.com"></script>
             <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet" />
             <link href="https://fonts.googleapis.com/css2?family=Padauk:wght@400;700&display=swap" rel="stylesheet" />
-            <style>{`body { font-family: 'Padauk', sans-serif; }`}</style>
+            <style>{`
+                body { font-family: 'Padauk', sans-serif; background-color: #09090b; color: #e4e4e7; }
+                .glass { background: rgba(39, 39, 42, 0.6); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.05); }
+                .custom-scroll::-webkit-scrollbar { width: 6px; }
+                .custom-scroll::-webkit-scrollbar-track { background: #18181b; }
+                .custom-scroll::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
+                .custom-scroll::-webkit-scrollbar-thumb:hover { background: #52525b; }
+            `}</style>
         </head>
-        <body class="bg-slate-900 text-white min-h-screen">
-            <nav class="bg-slate-800 p-4 border-b border-slate-700 flex justify-between items-center sticky top-0 z-50 shadow-lg">
-                <a href="/" class="text-xl font-black text-yellow-500 italic flex items-center gap-2">
-                    <i class="fa-solid fa-hard-drive"></i> GOLD STORAGE
-                </a>
-                {props.user ? (
-                    <div class="flex gap-3 items-center">
-                        <span class="text-xs font-bold text-gray-400 hidden sm:inline">{props.user.username}</span>
-                        {checkVipStatus(props.user) ? (
-                            <span class="bg-yellow-500 text-black px-2 py-0.5 rounded uppercase text-[10px] font-bold">VIP</span>
-                        ) : (
-                            <span class="bg-gray-600 text-white px-2 py-0.5 rounded uppercase text-[10px] font-bold">FREE</span>
-                        )}
-                        {props.user.username === ADMIN_USERNAME && <a href="/admin" class="text-xs bg-purple-600 px-3 py-1.5 rounded font-bold">Admin</a>}
-                        <a href="/logout" class="text-xs bg-red-600 px-3 py-1.5 rounded font-bold">ထွက်မည်</a>
-                    </div>
-                ) : (
-                    <a href="/login" class="text-xs bg-blue-600 px-3 py-1.5 rounded hover:bg-blue-500 font-bold">ဝင်မည်</a>
-                )}
+        <body data-vip={props.user && checkVipStatus(props.user) ? "true" : "false"}>
+            <nav class="fixed top-0 w-full z-50 glass border-b border-zinc-800">
+                <div class="max-w-5xl mx-auto px-4 py-3 flex justify-between items-center">
+                    <a href="/" class="text-xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-yellow-600 italic tracking-tighter">
+                        <i class="fa-solid fa-cube text-yellow-500 mr-2"></i>GOLD STORAGE
+                    </a>
+                    {props.user ? (
+                        <div class="flex gap-3 items-center">
+                            <div class="hidden sm:flex flex-col items-end leading-tight">
+                                <span class="text-xs font-bold text-gray-300">{props.user.username}</span>
+                                {checkVipStatus(props.user) ? (
+                                    <span class="text-[9px] text-yellow-500 font-bold tracking-wider">VIP MEMBER</span>
+                                ) : (
+                                    <span class="text-[9px] text-gray-500 font-bold tracking-wider">FREE MEMBER</span>
+                                )}
+                            </div>
+                            {props.user.username === ADMIN_USERNAME && <a href="/admin" class="w-8 h-8 flex items-center justify-center bg-purple-600 rounded-full hover:bg-purple-500 transition"><i class="fa-solid fa-shield-halved text-xs"></i></a>}
+                            <a href="/logout" class="w-8 h-8 flex items-center justify-center bg-zinc-800 border border-zinc-700 rounded-full hover:bg-red-600/20 hover:text-red-500 hover:border-red-500/50 transition"><i class="fa-solid fa-power-off text-xs"></i></a>
+                        </div>
+                    ) : (
+                        <a href="/login" class="text-xs bg-yellow-500 text-black px-4 py-2 rounded-full font-bold hover:bg-yellow-400 transition">ဝင်မည်</a>
+                    )}
+                </div>
             </nav>
-            <main class="p-4 max-w-4xl mx-auto pb-20">{props.children}</main>
+            <main class="pt-20 pb-10 px-4 max-w-5xl mx-auto">{props.children}</main>
             <div dangerouslySetInnerHTML={{__html: mainScript}} />
         </body>
     </html>
 );
 
 // =======================
-// 4. MAIN ROUTES
+// 4. ROUTES
 // =======================
 
 app.get("/", async (c) => {
@@ -194,127 +227,188 @@ app.get("/", async (c) => {
     }
 
     const totalMB = (totalBytes / 1024 / 1024).toFixed(2);
-    // VIP ဆိုရင် Unlimited ပြမယ်၊ မဟုတ်ရင် Limit ပြမယ်
-    const displayLimit = isVip ? "Unlimited" : (user.storageLimit / 1024 / 1024).toFixed(0) + " MB";
-    const usedPercent = isVip ? 5 : Math.min(100, (totalBytes / user.storageLimit) * 100);
+    // Limit Logic: VIP = Unlimited, Free = 200MB
+    const limitBytes = isVip ? 1000 * 1024 * 1024 * 1024 * 1024 : FREE_STORAGE_LIMIT; 
+    const displayLimit = isVip ? "∞" : "200 MB";
+    const usedPercent = Math.min(100, (totalBytes / limitBytes) * 100);
 
     return c.html(
         <Layout user={user}>
             
-            {/* USER INFO & STORAGE */}
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-                <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow flex flex-col justify-between">
-                    <div>
-                        <p class="text-xs text-gray-400 uppercase font-bold mb-1">အကောင့်အမျိုးအစား</p>
-                        <p class={`text-xl font-black ${isVip ? 'text-yellow-500' : 'text-gray-300'}`}>
-                            {isVip ? "Premium VIP" : "Free Account"}
+            {/* STATS & INFO */}
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                {/* Profile Card */}
+                <div class="glass p-5 rounded-2xl relative overflow-hidden group">
+                    <div class="absolute top-0 right-0 p-4 opacity-10 group-hover:scale-110 transition"><i class="fa-solid fa-id-card text-6xl text-white"></i></div>
+                    <p class="text-xs text-zinc-400 uppercase font-bold mb-1">အကောင့်အမျိုးအစား</p>
+                    <p class={`text-2xl font-black ${isVip ? 'text-yellow-500 drop-shadow-md' : 'text-zinc-300'}`}>
+                        {isVip ? "VIP PRO" : "Free Plan"}
+                    </p>
+                    {isVip && user.vipExpiry && (
+                        <p class="text-[10px] text-green-400 mt-2 font-mono bg-green-900/20 inline-block px-2 py-1 rounded">
+                            EXP: {formatDate(user.vipExpiry)}
                         </p>
-                        {isVip && user.vipExpiry && (
-                            <p class="text-xs text-green-400 mt-1">
-                                သက်တမ်းကုန်ဆုံးမည့်ရက်: {new Date(user.vipExpiry).toLocaleDateString()}
-                            </p>
-                        )}
-                        {!isVip && (
-                            <p class="text-xs text-red-400 mt-1">သက်တမ်းမရှိပါ (ကန့်သတ်ချက်များရှိသည်)</p>
-                        )}
-                    </div>
-                    <a href="/change-password" class="mt-4 text-xs text-blue-400 hover:text-white underline">စကားဝှက်ပြောင်းမည်</a>
+                    )}
+                    <a href="/change-password" class="absolute bottom-4 right-4 text-xs text-zinc-500 hover:text-white transition"><i class="fa-solid fa-key mr-1"></i> Pass</a>
                 </div>
 
-                <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow flex items-center justify-between">
-                    <div>
-                        <p class="text-xs text-gray-400 uppercase font-bold">Storage အသုံးပြုမှု</p>
-                        <p class="text-lg font-black">{totalMB} MB <span class="text-gray-500 text-sm font-normal">/ {displayLimit}</span></p>
+                {/* Storage Card */}
+                <div class="glass p-5 rounded-2xl relative">
+                    <div class="flex justify-between items-end mb-2">
+                        <div>
+                            <p class="text-xs text-zinc-400 uppercase font-bold">Storage</p>
+                            <p class="text-xl font-bold text-white">{totalMB} <span class="text-sm text-zinc-500">/ {displayLimit}</span></p>
+                        </div>
+                        <span class="text-2xl font-black text-zinc-600">{usedPercent.toFixed(0)}%</span>
                     </div>
-                    <div class="w-20 h-20 relative flex items-center justify-center">
-                        <div class="absolute inset-0 rounded-full border-4 border-slate-700"></div>
-                        <div class="absolute inset-0 rounded-full border-4 border-blue-500" style={`clip-path: inset(${100 - usedPercent}% 0 0 0)`}></div>
-                        <span class="text-xs font-bold">{isVip ? "VIP" : usedPercent.toFixed(0) + "%"}</span>
+                    <div class="w-full bg-zinc-800 rounded-full h-3 overflow-hidden">
+                        <div class={`h-full rounded-full ${isVip ? 'bg-gradient-to-r from-yellow-600 to-yellow-400' : 'bg-zinc-500'}`} style={`width: ${usedPercent}%`}></div>
+                    </div>
+                </div>
+
+                {/* File Count */}
+                <div class="glass p-5 rounded-2xl flex items-center justify-between">
+                    <div>
+                        <p class="text-xs text-zinc-400 uppercase font-bold">ဖိုင်စုစုပေါင်း</p>
+                        <p class="text-3xl font-black text-white">{files.length}</p>
+                    </div>
+                    <div class="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-500 text-2xl">
+                        <i class="fa-solid fa-folder-open"></i>
                     </div>
                 </div>
             </div>
 
-            {/* UPLOAD BOX */}
-            <div class="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg mb-8">
-                <h2 class="font-bold text-lg mb-4 flex items-center gap-2 text-blue-400"><i class="fa-solid fa-cloud-arrow-up"></i> ဖိုင်အသစ် တင်ရန်</h2>
-                <form id="uploadForm" onsubmit="uploadFile(event)" class="space-y-4">
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* UPLOAD AREA */}
+            <div class="glass p-6 rounded-2xl mb-8 border border-zinc-700/50 shadow-2xl">
+                <h2 class="font-bold text-lg mb-6 flex items-center gap-2 text-white">
+                    <span class="bg-blue-600 w-8 h-8 rounded-lg flex items-center justify-center text-sm"><i class="fa-solid fa-cloud-arrow-up"></i></span>
+                    ဖိုင်အသစ် တင်ရန်
+                </h2>
+                
+                <form id="uploadForm" onsubmit="uploadFile(event)" class="space-y-5">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
                         <div>
-                            <label class="label-text">ဖိုင်နာမည်ပြောင်းရန် (Optional)</label>
-                            <input name="customName" placeholder="File Name..." class="input-box w-full bg-slate-900 border border-slate-600 rounded p-2 text-sm" />
+                            <label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">ဖိုင်နာမည် (Optional)</label>
+                            <input name="customName" placeholder="File Name..." class="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-3 text-sm focus:border-yellow-500 outline-none transition" />
                         </div>
                         
-                        {/* 🔥 VIP EXPIRY SELECTOR */}
-                        {isVip ? (
-                            <div>
-                                <label class="label-text text-yellow-500 font-bold">သက်တမ်း ရွေးချယ်ပါ (VIP)</label>
-                                <select name="expiry" class="input-box w-full bg-slate-900 border border-slate-600 rounded p-2 text-sm">
+                        {/* EXPIRY */}
+                        <div>
+                            <label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">သက်တမ်း</label>
+                            {isVip ? (
+                                <select name="expiry" class="w-full bg-zinc-900 border border-yellow-600/50 rounded-xl p-3 text-sm text-yellow-500 font-bold focus:border-yellow-500 outline-none">
                                     <option value="0">Lifetime (မဖျက်ပါ)</option>
                                     <option value="7">1 Week</option>
                                     <option value="30">1 Month</option>
                                 </select>
-                            </div>
-                        ) : (
-                            <div class="opacity-50">
-                                <label class="label-text text-gray-500">သက်တမ်း (Free Plan)</label>
-                                <input disabled value="1 Month (Auto Delete)" class="input-box w-full bg-slate-900 border border-slate-600 rounded p-2 text-sm text-gray-500 cursor-not-allowed" />
-                                <input type="hidden" name="expiry" value="30" />
-                            </div>
-                        )}
-                    </div>
-
-                    <div>
-                        <label class="label-text mb-2 block">ဆာဗာ ရွေးချယ်ပါ</label>
-                        <div class="grid grid-cols-2 gap-4">
-                            <label class="cursor-pointer"><input type="radio" name="server" value="1" class="peer sr-only" checked /><div class="p-3 bg-slate-900 border border-slate-600 rounded peer-checked:border-blue-500 text-center text-sm font-bold">Server 1</div></label>
-                            <label class="cursor-pointer"><input type="radio" name="server" value="2" class="peer sr-only" /><div class="p-3 bg-slate-900 border border-slate-600 rounded peer-checked:border-yellow-500 text-center text-sm font-bold">Server 2</div></label>
+                            ) : (
+                                <div class="relative">
+                                    <input disabled value="1 Month (Free Limit)" class="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-3 text-sm text-zinc-500 cursor-not-allowed" />
+                                    <input type="hidden" name="expiry" value="30" />
+                                    <i class="fa-solid fa-lock absolute right-4 top-3.5 text-zinc-600"></i>
+                                </div>
+                            )}
                         </div>
                     </div>
 
-                    <div class="border-2 border-dashed border-slate-600 rounded-xl p-6 text-center hover:border-blue-500 transition bg-slate-900/50">
-                        <input type="file" id="fileInput" name="file" class="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:bg-blue-600 file:text-white cursor-pointer"/>
+                    {/* SERVER SELECT */}
+                    <div class="grid grid-cols-2 gap-4">
+                        <label class="cursor-pointer relative">
+                            <input type="radio" name="server" value="1" class="peer sr-only" checked />
+                            <div class="p-3 bg-zinc-900 border border-zinc-700 rounded-xl peer-checked:border-blue-500 peer-checked:bg-blue-500/10 text-center transition hover:bg-zinc-800">
+                                <span class="font-bold text-sm block text-gray-300 peer-checked:text-white">Server 1</span>
+                            </div>
+                        </label>
+                        <label class="cursor-pointer relative">
+                            <input type="radio" name="server" value="2" class="peer sr-only" />
+                            <div class="p-3 bg-zinc-900 border border-zinc-700 rounded-xl peer-checked:border-yellow-500 peer-checked:bg-yellow-500/10 text-center transition hover:bg-zinc-800">
+                                <span class="font-bold text-sm block text-gray-300 peer-checked:text-white">Server 2</span>
+                            </div>
+                        </label>
                     </div>
 
-                    <div id="progressContainer" class="hidden"><div class="flex justify-between text-xs mb-1"><span>Uploading...</span><span id="progressText">0%</span></div><div class="w-full bg-slate-700 rounded-full h-2"><div id="progressBar" class="bg-blue-600 h-2 rounded-full" style="width: 0%"></div></div></div>
-                    <button id="submitBtn" class="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded-xl font-bold transition">ဖိုင်တင်မည်</button>
+                    {/* FILE INPUT */}
+                    <div class="border-2 border-dashed border-zinc-700 rounded-2xl p-8 text-center hover:border-yellow-500/50 hover:bg-zinc-800/50 transition cursor-pointer group relative">
+                        <input type="file" id="fileInput" name="file" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/>
+                        <div class="space-y-2">
+                            <div class="w-12 h-12 bg-zinc-800 rounded-full flex items-center justify-center mx-auto text-zinc-400 group-hover:text-yellow-500 transition"><i class="fa-solid fa-plus text-xl"></i></div>
+                            <p class="text-sm font-bold text-zinc-300">Click to upload file</p>
+                            <p class="text-[10px] text-zinc-500">
+                                {isVip ? "Max Size: Unlimited" : "Max Size: 20MB"}
+                            </p>
+                        </div>
+                    </div>
+
+                    {/* PROGRESS */}
+                    <div id="progressContainer" class="hidden">
+                        <div class="flex justify-between text-[10px] uppercase font-bold text-zinc-400 mb-1">
+                            <span>Uploading...</span><span id="progressText">0%</span>
+                        </div>
+                        <div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden">
+                            <div id="progressBar" class="bg-yellow-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div>
+                        </div>
+                    </div>
+
+                    <button id="submitBtn" class="w-full bg-gradient-to-r from-yellow-600 to-yellow-500 text-black font-bold py-3.5 rounded-xl shadow-lg hover:brightness-110 transition active:scale-95">
+                        တင်မည်
+                    </button>
                 </form>
             </div>
 
-            <div class="flex gap-4 border-b border-slate-700 mb-4 pb-2">
-                <button id="btn-all" onclick="switchTab('all')" class="tab-btn text-sm font-bold text-yellow-500 border-b-2 border-yellow-500 pb-1">All Files</button>
-                <button id="btn-video" onclick="switchTab('video')" class="tab-btn text-sm font-bold text-gray-400 pb-1 hover:text-white">Videos</button>
-                <button id="btn-image" onclick="switchTab('image')" class="tab-btn text-sm font-bold text-gray-400 pb-1 hover:text-white">Images</button>
+            {/* FILE LIST SECTION */}
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="font-bold text-white text-sm uppercase tracking-wide">
+                    <i class="fa-solid fa-list-ul mr-2 text-zinc-500"></i> My Files
+                </h3>
+                <div class="flex bg-zinc-900 p-1 rounded-lg">
+                    <button id="btn-all" onclick="switchTab('all')" class="tab-btn px-3 py-1 text-[10px] font-bold rounded-md bg-yellow-500 text-black transition">ALL</button>
+                    <button id="btn-video" onclick="switchTab('video')" class="tab-btn px-3 py-1 text-[10px] font-bold rounded-md text-gray-400 hover:text-white transition">VIDEO</button>
+                    <button id="btn-image" onclick="switchTab('image')" class="tab-btn px-3 py-1 text-[10px] font-bold rounded-md text-gray-400 hover:text-white transition">IMG</button>
+                </div>
             </div>
 
-            <div class="space-y-3">
-                {files.map(f => (
-                    <div class={`file-item type-${f.type} bg-slate-800 p-4 rounded-lg border border-slate-700 flex justify-between items-center`}>
-                        <div class="flex items-center gap-4 overflow-hidden">
-                            <div class="min-w-0">
-                                <p class="font-bold text-sm truncate text-white">{f.name}</p>
-                                <div class="flex gap-3 text-[10px] text-gray-400">
-                                    <span>{f.size}</span>
-                                    <span>{new Date(f.uploadedAt).toLocaleDateString()}</span>
-                                    {f.expiresAt > 0 ? (
-                                        <span class="text-red-400">Exp: {new Date(f.expiresAt).toLocaleDateString()}</span>
-                                    ) : (
-                                        <span class="text-green-400">Lifetime</span>
-                                    )}
+            {/* SCROLLABLE FILE LIST CONTAINER */}
+            <div class="glass rounded-2xl overflow-hidden border border-zinc-700/50">
+                <div class="max-h-[500px] overflow-y-auto custom-scroll p-2 space-y-2">
+                    {files.map(f => (
+                        <div class={`file-item type-${f.type} bg-zinc-800/50 hover:bg-zinc-800 p-3 rounded-xl flex justify-between items-center group transition border border-transparent hover:border-zinc-600`}>
+                            <div class="flex items-center gap-4 overflow-hidden">
+                                <div class={`w-10 h-10 rounded-lg flex items-center justify-center text-lg flex-shrink-0 ${f.type === 'image' ? 'bg-yellow-500/10 text-yellow-500' : f.type === 'video' ? 'bg-blue-500/10 text-blue-500' : 'bg-zinc-700 text-zinc-400'}`}>
+                                    <i class={`fa-solid ${f.type === 'image' ? 'fa-image' : f.type === 'video' ? 'fa-clapperboard' : 'fa-file'}`}></i>
+                                </div>
+                                <div class="min-w-0">
+                                    <p class="font-bold text-sm truncate text-zinc-200 group-hover:text-white transition">{f.name}</p>
+                                    <div class="flex items-center gap-3 text-[10px] text-zinc-500 font-mono mt-0.5">
+                                        <span class="bg-zinc-900 px-1.5 rounded text-zinc-400">{f.size}</span>
+                                        <span>{formatDate(f.uploadedAt)}</span>
+                                        {f.expiresAt > 0 ? (
+                                            <span class="text-red-400 bg-red-900/10 px-1.5 rounded">Exp: {formatDate(f.expiresAt)}</span>
+                                        ) : (
+                                            <span class="text-green-500 bg-green-900/10 px-1.5 rounded">Lifetime</span>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
+                            <div class="flex gap-2 opacity-80 group-hover:opacity-100 transition">
+                                <a href={f.downloadUrl} target="_blank" class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-blue-600 text-white rounded-lg transition"><i class="fa-solid fa-download text-xs"></i></a>
+                                <button onclick={`navigator.clipboard.writeText('${f.downloadUrl}'); this.innerHTML='<i class="fa-solid fa-check"></i>'; setTimeout(()=>this.innerHTML='<i class="fa-regular fa-copy"></i>', 1000)`} class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-green-600 text-white rounded-lg transition"><i class="fa-regular fa-copy text-xs"></i></button>
+                                <form action={`/delete/${f.id}`} method="post" onsubmit="return confirm('ဖျက်မှာသေချာလား?')"><button class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-red-600 text-white rounded-lg transition"><i class="fa-solid fa-trash text-xs"></i></button></form>
+                            </div>
                         </div>
-                        <div class="flex gap-2">
-                            <a href={f.downloadUrl} target="_blank" class="p-2 bg-slate-700 rounded hover:bg-blue-600 text-white"><i class="fa-solid fa-download"></i></a>
-                            <button onclick={`navigator.clipboard.writeText('${f.downloadUrl}'); alert('Copied')`} class="p-2 bg-slate-700 rounded hover:bg-green-600 text-white"><i class="fa-regular fa-copy"></i></button>
-                            <form action={`/delete/${f.id}`} method="post" onsubmit="return confirm('ဖျက်မှာသေချာလား?')"><button class="p-2 bg-slate-700 rounded hover:bg-red-600 text-white"><i class="fa-solid fa-trash"></i></button></form>
+                    ))}
+                    {files.length === 0 && (
+                        <div class="text-center text-zinc-500 py-12 flex flex-col items-center">
+                            <i class="fa-solid fa-folder-open text-4xl mb-3 opacity-20"></i>
+                            <p class="text-sm">ဖိုင်များ မရှိသေးပါ။</p>
                         </div>
-                    </div>
-                ))}
+                    )}
+                </div>
             </div>
         </Layout>
     );
 });
 
+// 🔥 UPLOAD HANDLER
 app.post("/upload", async (c) => {
     const cookie = getCookie(c, "auth");
     if(!cookie) return c.text("Unauthorized", 401);
@@ -328,14 +422,13 @@ app.post("/upload", async (c) => {
     const customName = String(body['customName']).trim();
     let expiryDays = parseInt(String(body['expiry'])) || 30;
 
-    // 🔥 FORCE RULES
+    // 🔥 LIMIT CHECK (BACKEND)
     if (!isVip) {
-        expiryDays = 30; // Free = 1 Month
-        if (user.usedStorage + file.size > user.storageLimit) return c.text("Storage Full! (Free Limit)", 400);
-    } else {
-        // VIP = Unlimited Storage (Actually very high limit)
-        // User can choose Expiry (0 = Lifetime)
-    }
+        // Free User Constraints
+        expiryDays = 30; 
+        if (file.size > FREE_UPLOAD_LIMIT) return c.text("Free Limit: Max 20MB per file", 400);
+        if (user.usedStorage + file.size > FREE_STORAGE_LIMIT) return c.text("Storage Full! (Free 200MB Limit)", 400);
+    } 
 
     if (file instanceof File) {
         try {
@@ -371,7 +464,7 @@ app.post("/upload", async (c) => {
                 uploadedAt: Date.now(),
                 type: type,
                 expiresAt: expiryDays > 0 ? Date.now() + (expiryDays * 86400000) : 0,
-                isVipFile: isVip && expiryDays === 0 // Mark as Lifetime VIP file
+                isVipFile: isVip && expiryDays === 0
             };
 
             await kv.set(["files", user.username, fileData.id], fileData);
@@ -384,7 +477,7 @@ app.post("/upload", async (c) => {
     return c.text("No file", 400);
 });
 
-// 🔥 CRON JOB: CLEANUP & VIP DOWNGRADE
+// 🔥 CRON JOB (DELETE EXPIRED)
 app.get("/api/cron/cleanup", async (c) => {
     const usersIter = kv.list<User>({ prefix: ["users"] });
     let deletedCount = 0;
@@ -396,41 +489,32 @@ app.get("/api/cron/cleanup", async (c) => {
         let updatedStorage = user.usedStorage;
         let userUpdated = false;
 
-        // 1. VIP Expiry Check
+        // Check VIP Expiry & Grace Period
         if (user.vipExpiry && user.vipExpiry < now) {
-            // VIP Expired
-            // Check Grace Period (7 Days)
-            const gracePeriodEnd = user.vipExpiry + (GRACE_PERIOD_DAYS * 86400000);
-            
+            const gracePeriodEnd = user.vipExpiry + (7 * 86400000); // 7 Days Grace
             if (now > gracePeriodEnd) {
-                // Grace Period Over -> Delete VIP Files
+                user.isVip = false;
+                user.vipExpiry = undefined;
+                userUpdated = true;
+                // Delete VIP lifetime files
                 for await (const f of filesIter) {
-                    const file = f.value;
-                    // If file marked as VIP Lifetime or file makes storage exceed limit
-                    if (file.isVipFile || file.expiresAt === 0) {
-                        await deleteFileFromR2(file);
+                    if (f.value.isVipFile || f.value.expiresAt === 0) {
+                        await deleteFileFromR2(f.value);
                         await kv.delete(f.key);
-                        updatedStorage = Math.max(0, updatedStorage - file.sizeBytes);
+                        updatedStorage = Math.max(0, updatedStorage - f.value.sizeBytes);
                         deletedCount++;
                     }
                 }
-                // Downgrade User
-                user.isVip = false;
-                user.vipExpiry = undefined;
-                user.storageLimit = 200 * 1024 * 1024; // Back to Free Limit
-                userUpdated = true;
             }
         }
 
-        // 2. Normal File Expiry Check
-        // (Re-fetch iterator because we might have deleted some)
+        // Check Normal Expiry
         const filesIter2 = kv.list<FileData>({ prefix: ["files", user.username] });
         for await (const f of filesIter2) {
-            const file = f.value;
-            if (file.expiresAt > 0 && file.expiresAt < now) {
-                await deleteFileFromR2(file);
+            if (f.value.expiresAt > 0 && f.value.expiresAt < now) {
+                await deleteFileFromR2(f.value);
                 await kv.delete(f.key);
-                updatedStorage = Math.max(0, updatedStorage - file.sizeBytes);
+                updatedStorage = Math.max(0, updatedStorage - f.value.sizeBytes);
                 deletedCount++;
                 userUpdated = true;
             }
@@ -450,7 +534,6 @@ async function deleteFileFromR2(f: FileData) {
     try { await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: f.r2Key })); } catch (e) { console.error(e); }
 }
 
-// DELETE HANDLER
 app.post("/delete/:id", async (c) => {
     const cookie = getCookie(c, "auth");
     const user = await getUser(cookie || "");
@@ -466,35 +549,21 @@ app.post("/delete/:id", async (c) => {
     return c.redirect("/");
 });
 
-// CHANGE PASSWORD
-app.get("/change-password", (c) => c.html(<Layout title="Change Password"><div class="max-w-sm mx-auto mt-20 bg-slate-800 p-8 rounded-xl"><h1 class="text-xl font-bold mb-4">စကားဝှက်ပြောင်းမည်</h1><form action="/change-password" method="post" class="space-y-4"><input type="password" name="newpass" placeholder="New Password" required class="input-box w-full p-2 bg-slate-900 border rounded" /><button class="bg-blue-600 w-full py-2 rounded font-bold">အတည်ပြုမည်</button></form><a href="/" class="block text-center mt-4 text-xs text-gray-400">Back</a></div></Layout>));
-app.post("/change-password", async (c) => {
-    const cookie = getCookie(c, "auth");
-    const user = await getUser(cookie || "");
-    if(!user) return c.redirect("/login");
-    const { newpass } = await c.req.parseBody();
-    if(String(newpass).length < 6) return c.text("Password too short");
-    user.passwordHash = await hashPassword(String(newpass));
-    await kv.set(["users", user.username], user);
-    return c.redirect("/");
-});
-
-// AUTH
-app.get("/login", (c) => c.html(<Layout title="Login"><div class="max-w-sm mx-auto mt-20 bg-slate-800 p-8 rounded-xl border border-slate-700 shadow-2xl"><h1 class="text-2xl font-black mb-6 text-center text-yellow-500 italic">GOLD STORAGE</h1><form action="/login" method="post" class="space-y-4"><input name="username" placeholder="Username" required class="input-box w-full p-3 bg-slate-900 border border-slate-600 rounded text-white" /><input type="password" name="password" placeholder="Password" required class="input-box w-full p-3 bg-slate-900 border border-slate-600 rounded text-white" /><button class="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded font-bold">အကောင့်ဝင်မည်</button></form><p class="text-center text-xs mt-4 text-gray-400">အကောင့်မရှိဘူးလား? <a href="/register" class="text-blue-400 font-bold">အကောင့်သစ်ဖွင့်မယ်</a></p></div></Layout>));
+// AUTH & ADMIN
+app.get("/login", (c) => c.html(<Layout title="Login"><div class="max-w-sm mx-auto mt-24 glass p-8 rounded-2xl border border-zinc-700"><h1 class="text-3xl font-black mb-2 text-center text-yellow-500 italic">GOLD STORAGE</h1><p class="text-center text-zinc-500 text-xs mb-8">လုံခြုံစိတ်ချရသော Cloud Storage</p><form action="/login" method="post" class="space-y-4"><input name="username" placeholder="အမည် (Username)" required class="w-full bg-zinc-900 border border-zinc-700 p-3 rounded-xl text-white focus:border-yellow-500 outline-none" /><input type="password" name="password" placeholder="စကားဝှက် (Password)" required class="w-full bg-zinc-900 border border-zinc-700 p-3 rounded-xl text-white focus:border-yellow-500 outline-none" /><button class="w-full bg-gradient-to-r from-yellow-600 to-yellow-500 text-black font-bold py-3 rounded-xl hover:brightness-110">ဝင်မည်</button></form><p class="text-center text-xs mt-6 text-zinc-500">အကောင့်မရှိဘူးလား? <a href="/register" class="text-yellow-500 font-bold hover:underline">အကောင့်သစ်ဖွင့်မယ်</a></p></div></Layout>));
 app.post("/login", async (c) => {
     const { username, password } = await c.req.parseBody();
     const u = String(username).trim();
-    const p = String(password).trim();
     const user = await getUser(u);
-    if (user && user.passwordHash === await hashPassword(p)) { setCookie(c, "auth", u, { path: "/", maxAge: 86400 * 30 }); return c.redirect("/"); }
-    return c.html(<Layout><p class="text-center text-red-500 mt-20">မှားယွင်းနေပါသည်။ <a href="/login" class="underline">ပြန်ကြိုးစားပါ</a></p></Layout>);
+    if (user && user.passwordHash === await hashPassword(String(password).trim())) { setCookie(c, "auth", u, { path: "/", maxAge: 86400 * 30 }); return c.redirect("/"); }
+    return c.html(<Layout><p class="text-center text-red-500 mt-20">မှားယွင်းနေပါသည်။</p></Layout>);
 });
-app.get("/register", (c) => c.html(<Layout title="Register"><div class="max-w-sm mx-auto mt-20 bg-slate-800 p-8 rounded-xl border border-slate-700"><h1 class="text-xl font-bold mb-6 text-center text-white">အကောင့်သစ်ဖွင့်မည်</h1><form action="/register" method="post" class="space-y-4"><input name="username" placeholder="Username" required class="w-full p-3 bg-slate-900 border border-slate-600 rounded text-white" /><input type="password" name="password" placeholder="Password" required class="w-full p-3 bg-slate-900 border border-slate-600 rounded text-white" /><button class="w-full bg-green-600 hover:bg-green-500 py-3 rounded font-bold">စာရင်းသွင်းမည်</button></form></div></Layout>));
+app.get("/register", (c) => c.html(<Layout title="Register"><div class="max-w-sm mx-auto mt-24 glass p-8 rounded-2xl border border-zinc-700"><h1 class="text-xl font-bold mb-6 text-center text-white">အကောင့်သစ်ဖွင့်မည်</h1><form action="/register" method="post" class="space-y-4"><input name="username" placeholder="Username" required class="w-full bg-zinc-900 border border-zinc-700 p-3 rounded-xl text-white" /><input type="password" name="password" placeholder="Password" required class="w-full bg-zinc-900 border border-zinc-700 p-3 rounded-xl text-white" /><button class="w-full bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold">စာရင်းသွင်းမည်</button></form></div></Layout>));
 app.post("/register", async (c) => {
     const { username, password } = await c.req.parseBody();
     const u = String(username).trim();
     if (await getUser(u)) return c.html(<Layout><p class="text-center text-red-500 mt-20">Username ရှိပြီးသားဖြစ်နေသည်။</p></Layout>);
-    const newUser: User = { username: u, passwordHash: await hashPassword(String(password)), isVip: false, storageLimit: 200 * 1024 * 1024, usedStorage: 0, createdAt: Date.now() };
+    const newUser: User = { username: u, passwordHash: await hashPassword(String(password)), isVip: false, usedStorage: 0, createdAt: Date.now() };
     await kv.set(["users", u], newUser);
     return c.redirect("/login");
 });
@@ -506,7 +575,37 @@ app.get("/admin", async (c) => {
     if(cookie !== ADMIN_USERNAME) return c.redirect("/");
     const iter = kv.list<User>({ prefix: ["users"] });
     const users = []; for await (const res of iter) users.push(res.value);
-    return c.html(<Layout title="Admin Panel" user={{ username: ADMIN_USERNAME, isVip: true } as any}><h1 class="text-2xl font-bold mb-6">User Management</h1><div class="space-y-4">{users.map(u => (<div class="bg-slate-800 p-4 rounded border border-slate-700 flex justify-between items-center"><div><p class="font-bold">{u.username} {u.isVip && <span class="text-yellow-500 text-xs">VIP</span>}</p><p class="text-xs text-gray-400">Used: {(u.usedStorage/1024/1024).toFixed(2)} MB</p>{u.vipExpiry && <p class="text-xs text-green-400">Exp: {new Date(u.vipExpiry).toLocaleDateString()}</p>}</div><form action="/admin/add-vip" method="post" class="flex gap-2"><input type="hidden" name="username" value={u.username} /><select name="days" class="bg-slate-900 text-xs p-2 rounded"><option value="30">Add 1 Month</option><option value="90">Add 3 Months</option><option value="365">Add 1 Year</option><option value="9999">Lifetime</option><option value="-1">Remove VIP</option></select><button class="bg-blue-600 px-3 py-1 rounded text-xs font-bold">Save</button></form></div>))}</div></Layout>);
+    return c.html(
+        <Layout title="Admin Panel" user={{ username: ADMIN_USERNAME, isVip: true } as any}>
+            <div class="glass p-6 rounded-2xl border border-zinc-700">
+                <h1 class="text-2xl font-bold mb-6 flex items-center gap-2"><i class="fa-solid fa-users-gear text-purple-500"></i> User Management</h1>
+                <div class="space-y-4">
+                    {users.map(u => (
+                        <div class="bg-zinc-800/50 p-4 rounded-xl border border-zinc-700 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                            <div>
+                                <p class="font-bold text-white flex items-center gap-2">
+                                    {u.username} 
+                                    {checkVipStatus(u) ? <span class="bg-yellow-500 text-black px-1.5 rounded text-[10px] font-bold">VIP</span> : <span class="bg-zinc-600 px-1.5 rounded text-[10px]">FREE</span>}
+                                </p>
+                                <p class="text-xs text-gray-400 mt-1">Used: {(u.usedStorage/1024/1024).toFixed(2)} MB</p>
+                                {u.vipExpiry && <p class="text-[10px] text-green-400 mt-0.5">Exp: {formatDate(u.vipExpiry)}</p>}
+                            </div>
+                            <form action="/admin/add-vip" method="post" class="flex gap-2">
+                                <input type="hidden" name="username" value={u.username} />
+                                <select name="days" class="bg-zinc-900 text-xs p-2 rounded-lg border border-zinc-600 outline-none focus:border-purple-500">
+                                    <option value="30">Add 1 Month</option>
+                                    <option value="90">Add 3 Months</option>
+                                    <option value="365">Add 1 Year</option>
+                                    <option value="-1">Remove VIP</option>
+                                </select>
+                                <button class="bg-purple-600 hover:bg-purple-500 px-4 py-2 rounded-lg text-xs font-bold transition shadow-lg">Save</button>
+                            </form>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        </Layout>
+    );
 });
 
 app.post("/admin/add-vip", async (c) => {
@@ -520,10 +619,8 @@ app.post("/admin/add-vip", async (c) => {
         if (addDays === -1) {
             user.isVip = false;
             user.vipExpiry = undefined;
-            user.storageLimit = 200 * 1024 * 1024;
         } else {
             user.isVip = true;
-            user.storageLimit = 1000 * 1024 * 1024 * 1024 * 1024; // 1TB Unlimited
             const now = Date.now();
             const currentExp = (user.vipExpiry && user.vipExpiry > now) ? user.vipExpiry : now;
             user.vipExpiry = currentExp + (addDays * 24 * 60 * 60 * 1000);
