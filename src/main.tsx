@@ -1,5 +1,5 @@
 /** @jsxImportSource npm:hono@4/jsx */
-import { Hono } from "npm:hono@4";
+import { Hono, Context } from "npm:hono@4";
 import { getCookie, setCookie, deleteCookie } from "npm:hono@4/cookie";
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand } from "npm:@aws-sdk/client-s3";
 import { getSignedUrl } from "npm:@aws-sdk/s3-request-presigner";
@@ -9,10 +9,10 @@ const app = new Hono();
 const kv = await Deno.openKv();
 
 // =======================
-// 1. CONFIGURATION
+// 1. CONFIGURATION & ENV
 // =======================
-const ADMIN_USERNAME = "soekyawwin"; 
-const SECRET_KEY = Deno.env.get("SECRET_SALT") || "change-this-secret-key-securely";
+const ADMIN_USERNAME = Deno.env.get("ADMIN_USERNAME") || "admin"; // Env ကဖတ်မယ် (Default: admin)
+const SECRET_KEY = Deno.env.get("SECRET_SALT") || "secure-random-secret-key-must-change";
 const MAX_REMOTE_SIZE = 1.5 * 1024 * 1024 * 1024; // 1.5 GB
 
 const PLANS = {
@@ -38,9 +38,22 @@ const s3Server2 = new S3Client({
 // =======================
 // 2. TYPES & HELPERS
 // =======================
-interface User { username: string; passwordHash: string; plan: keyof typeof PLANS; isVip: boolean; vipExpiry?: number; usedStorage: number; createdAt: number; }
+interface User { 
+    username: string; 
+    passwordHash: string; 
+    plan: keyof typeof PLANS; 
+    isVip: boolean; 
+    vipExpiry?: number; 
+    usedStorage: number; 
+    createdAt: number;
+    isBanned?: boolean; // New: Ban Feature
+}
+interface Session { username: string; expires: number; csrfToken: string; }
 interface FileData { id: string; name: string; sizeBytes: number; size: string; server: "1" | "2"; r2Key: string; uploadedAt: number; expiresAt: number; type: "image" | "video" | "other"; isVipFile: boolean; }
 
+// --- Security Helper Functions ---
+
+// Password Hashing
 async function hashPassword(password: string) {
     const enc = new TextEncoder();
     const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(password), { name: "PBKDF2" }, false, ["deriveBits", "deriveKey"]);
@@ -48,13 +61,47 @@ async function hashPassword(password: string) {
     const exported = await crypto.subtle.exportKey("raw", key);
     return Array.from(new Uint8Array(exported)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
-async function getUser(username: string) { 
-    const res = await kv.get<User>(["users", username]); 
-    if (!res.value) return null;
-    const user = res.value;
-    if (!user.plan || !PLANS[user.plan]) { user.plan = user.isVip ? 'vip50' : 'free'; await kv.set(["users", username], user); }
-    return user; 
+
+// Session Management (Secure Auth)
+async function createSession(c: Context, username: string) {
+    const sessionId = crypto.randomUUID();
+    const csrfToken = crypto.randomUUID();
+    const expires = Date.now() + (7 * 24 * 60 * 60 * 1000); // 7 Days
+    await kv.set(["sessions", sessionId], { username, expires, csrfToken });
+    setCookie(c, "session_id", sessionId, { path: "/", httpOnly: true, secure: true, sameSite: "Lax", maxAge: 7 * 24 * 60 * 60 });
 }
+
+async function getSessionUser(c: Context): Promise<{ user: User, csrfToken: string } | null> {
+    const sessionId = getCookie(c, "session_id");
+    if (!sessionId) return null;
+    const res = await kv.get<Session>(["sessions", sessionId]);
+    if (!res.value) return null;
+    if (res.value.expires < Date.now()) { await kv.delete(["sessions", sessionId]); return null; }
+    
+    // Get Real User
+    const uRes = await kv.get<User>(["users", res.value.username]);
+    if (!uRes.value) return null;
+    
+    // Auto-fix plan if missing
+    const user = uRes.value;
+    if (!user.plan || !PLANS[user.plan]) { user.plan = user.isVip ? 'vip50' : 'free'; await kv.set(["users", user.username], user); }
+    
+    return { user, csrfToken: res.value.csrfToken };
+}
+
+// SSRF Protection (URL Validation)
+function isValidRemoteUrl(urlString: string): boolean {
+    try {
+        const url = new URL(urlString);
+        if (!['http:', 'https:'].includes(url.protocol)) return false;
+        const host = url.hostname;
+        // Block Localhost & Private IPs
+        if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]') return false;
+        if (host.startsWith('192.168.') || host.startsWith('10.') || host.match(/^172\.(1[6-9]|2\d|3[0-1])\./)) return false;
+        return true;
+    } catch { return false; }
+}
+
 function isVipActive(user: User): boolean { if (user.plan === 'free') return false; return user.vipExpiry ? user.vipExpiry > Date.now() : false; }
 function formatDate(ts: number) { return new Date(ts).toLocaleDateString('my-MM', { day: 'numeric', month: 'short', year: 'numeric' }); }
 function mimeToExt(mime: string): string { const m: any = {'video/mp4':'mp4','video/webm':'webm','video/x-matroska':'mkv','image/jpeg':'jpg','image/png':'png'}; return m[mime.split(';')[0]] || 'bin'; }
@@ -65,7 +112,10 @@ function mimeToExt(mime: string): string { const m: any = {'video/mp4':'mp4','vi
 const mainScript = `
 <script>
     const IS_USER_VIP = window.IS_VIP_USER || false;
-    let targetFileId = null; // For Edit/Delete
+    let targetFileId = null; 
+
+    // FOUC Fix
+    document.body.style.opacity = '1';
 
     function switchTab(tab) {
         const url = new URL(window.location);
@@ -76,7 +126,7 @@ const mainScript = `
     
     function switchUploadMode(mode) {
         if (mode === 'remote' && !IS_USER_VIP) {
-            alert("⚠️ VIP သီးသန့်အစီအစဉ်ဖြစ်ပါသည်။\\n\\nRemote Upload (URL ဖြင့်တင်ခြင်း) ကိုအသုံးပြုရန် အကောင့်အဆင့်မြှင့်ပါ။");
+            alert("⚠️ VIP Only Feature!\\n\\nRemote Upload ကိုအသုံးပြုရန် အကောင့်အဆင့်မြှင့်ပါ။");
             return;
         }
         document.querySelectorAll('.upload-mode').forEach(el => el.classList.add('hidden'));
@@ -87,33 +137,20 @@ const mainScript = `
         document.getElementById('btn-mode-' + mode).classList.add('bg-yellow-500', 'text-black');
     }
 
-    // --- MODAL FUNCTIONS (CUSTOM BOXES) ---
-    function openDeleteModal(fileId) {
-        targetFileId = fileId;
-        document.getElementById('deleteModal').classList.remove('hidden');
-    }
-    
-    function openEditModal(fileId) {
-        if (!IS_USER_VIP) return;
-        targetFileId = fileId;
-        document.getElementById('editModal').classList.remove('hidden');
-    }
-
-    function closeModal(id) {
-        document.getElementById(id).classList.add('hidden');
-        targetFileId = null;
-    }
+    function openDeleteModal(fileId) { targetFileId = fileId; document.getElementById('deleteModal').classList.remove('hidden'); }
+    function openEditModal(fileId) { if (!IS_USER_VIP) return; targetFileId = fileId; document.getElementById('editModal').classList.remove('hidden'); }
+    function closeModal(id) { document.getElementById(id).classList.add('hidden'); targetFileId = null; }
 
     async function confirmDelete() {
         if(!targetFileId) return;
         const btn = document.getElementById('btnConfirmDelete');
         btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ဖျက်နေသည်...';
         btn.disabled = true;
-
         try {
-            const res = await fetch('/delete/' + targetFileId, { method: 'POST' });
-            if(res.ok) window.location.reload();
-            else alert("ဖျက်မရပါ");
+            const form = document.createElement('form');
+            form.method = 'POST'; form.action = '/delete/' + targetFileId;
+            const csrf = document.createElement('input'); csrf.type = 'hidden'; csrf.name = 'csrf'; csrf.value = window.CSRF_TOKEN;
+            form.appendChild(csrf); document.body.appendChild(form); form.submit();
         } catch(e) { alert("Error"); }
     }
 
@@ -128,7 +165,7 @@ const mainScript = `
             const res = await fetch('/api/file/edit', { 
                 method: 'POST', 
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ fileId: targetFileId, days: days }) 
+                body: JSON.stringify({ fileId: targetFileId, days: days, csrf: window.CSRF_TOKEN }) 
             });
             const d = await res.json();
             if(d.success) window.location.reload();
@@ -136,14 +173,15 @@ const mainScript = `
         } catch(e) { alert("Error"); }
     }
 
-    // SEARCH
-    function filterFiles() {
-        const input = document.getElementById('searchInput');
-        const filter = input.value.toLowerCase();
-        const nodes = document.getElementsByClassName('file-item');
-        for (let i = 0; i < nodes.length; i++) {
-            let name = nodes[i].getAttribute('data-name').toLowerCase();
-            nodes[i].style.display = name.includes(filter) ? "" : "none";
+    // SEARCH (Server side redirect for better UX)
+    function handleSearch(e) {
+        if(e.key === 'Enter') {
+            const val = e.target.value;
+            const url = new URL(window.location);
+            if(val) url.searchParams.set('q', val);
+            else url.searchParams.delete('q');
+            url.searchParams.delete('cursor');
+            window.location.href = url.toString();
         }
     }
 
@@ -174,9 +212,17 @@ const mainScript = `
             const formData = new FormData(form);
             const presignRes = await fetch("/api/upload/presign", {
                 method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ name: fileInput.files[0].name, type: fileInput.files[0].type, size: fileInput.files[0].size, server: formData.get("server"), customName: formData.get("customName") })
+                body: JSON.stringify({ 
+                    name: fileInput.files[0].name, 
+                    type: fileInput.files[0].type, 
+                    size: fileInput.files[0].size, 
+                    server: formData.get("server"), 
+                    customName: formData.get("customName"),
+                    csrf: window.CSRF_TOKEN 
+                })
             });
-            if (!presignRes.ok) throw new Error(await presignRes.text());
+            
+            if (!presignRes.ok) { const err = await presignRes.json(); throw new Error(err.error || "Presign Error"); }
             const { url, key, fileId } = await presignRes.json();
 
             submitBtn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> တင်နေပါသည်...';
@@ -193,7 +239,11 @@ const mainScript = `
             xhr.onload = async () => {
                 if (xhr.status === 200) {
                     submitBtn.innerHTML = 'သိမ်းဆည်းနေသည်...';
-                    await fetch("/api/upload/complete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, fileId, server: formData.get("server"), expiry: formData.get("expiry") }) });
+                    await fetch("/api/upload/complete", { 
+                        method: "POST", 
+                        headers: { "Content-Type": "application/json" }, 
+                        body: JSON.stringify({ key, fileId, server: formData.get("server"), expiry: formData.get("expiry"), csrf: window.CSRF_TOKEN }) 
+                    });
                     document.getElementById('progressBar').classList.add('bg-green-500');
                     submitBtn.innerHTML = 'အောင်မြင်သည်';
                     setTimeout(() => window.location.reload(), 1000);
@@ -220,7 +270,8 @@ const mainScript = `
                     url: urlInput.value,
                     customName: document.getElementById('remoteName').value,
                     server: document.querySelector('input[name="server_remote"]:checked').value,
-                    expiry: document.querySelector('select[name="expiry_remote"]').value
+                    expiry: document.querySelector('select[name="expiry_remote"]').value,
+                    csrf: window.CSRF_TOKEN
                 })
             });
 
@@ -257,7 +308,7 @@ const mainScript = `
 </script>
 `;
 
-const Layout = (props: { children: any; title?: string; user?: User | null }) => {
+const Layout = (props: { children: any; title?: string; user?: User | null, csrfToken?: string }) => {
     const isVip = props.user ? isVipActive(props.user) : false;
     return (
     <html>
@@ -268,7 +319,7 @@ const Layout = (props: { children: any; title?: string; user?: User | null }) =>
             <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet" />
             <link href="https://fonts.googleapis.com/css2?family=Padauk:wght@400;700&display=swap" rel="stylesheet" />
             <style>{`
-                body { font-family: 'Padauk', sans-serif; background-color: #000000; color: #e4e4e7; }
+                body { font-family: 'Padauk', sans-serif; background-color: #000000; color: #e4e4e7; opacity: 0; transition: opacity 0.3s; }
                 .glass { background: #111111; border: 1px solid #333; }
                 .vip-card { background: linear-gradient(145deg, #222, #111); border: 1px solid #333; transition: 0.3s; }
                 .vip-card:hover { border-color: #eab308; transform: translateY(-5px); }
@@ -280,15 +331,12 @@ const Layout = (props: { children: any; title?: string; user?: User | null }) =>
                 .modal-box { background: #18181b; border: 1px solid #eab308; border-radius: 16px; padding: 24px; width: 90%; max-width: 400px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04); animation: modalPop 0.2s ease-out; }
                 @keyframes modalPop { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }
             `}</style>
-            <script dangerouslySetInnerHTML={{__html: `window.IS_VIP_USER = ${isVip};`}} />
+            <script dangerouslySetInnerHTML={{__html: `window.IS_VIP_USER = ${isVip}; window.CSRF_TOKEN = "${props.csrfToken || ''}";`}} />
         </head>
         <body data-vip={isVip ? "true" : "false"}>
             <nav class="fixed top-0 w-full z-50 glass border-b border-zinc-800 bg-black/80 backdrop-blur-md"><div class="max-w-5xl mx-auto px-4 py-3 flex justify-between items-center"><a href="/" class="text-xl font-black text-white italic tracking-tighter flex items-center gap-2"><i class="fa-solid fa-cube text-yellow-500"></i> <span class="bg-clip-text text-transparent bg-gradient-to-r from-yellow-400 to-yellow-600">GOLD STORAGE</span></a>{props.user ? (<div class="flex gap-3 items-center"><div class="hidden sm:flex flex-col items-end leading-tight"><span class="text-xs font-bold text-gray-300">{props.user.username}</span>{isVipActive(props.user) ? <span class="text-[9px] text-yellow-500 font-bold bg-yellow-500/10 px-1 rounded">VIP</span> : <span class="text-[9px] text-gray-500 font-bold bg-zinc-800 px-1 rounded">FREE</span>}</div>{props.user.username === ADMIN_USERNAME && <a href="/admin" class="w-8 h-8 flex items-center justify-center bg-purple-600 rounded-full hover:bg-purple-500 text-white"><i class="fa-solid fa-shield-halved text-xs"></i></a>}<a href="/logout" class="w-8 h-8 flex items-center justify-center bg-zinc-800 border border-zinc-700 rounded-full hover:bg-red-600/20 hover:text-red-500"><i class="fa-solid fa-power-off text-xs"></i></a></div>) : (<a href="/login" class="text-xs bg-yellow-500 text-black px-4 py-2 rounded-full font-bold hover:bg-yellow-400 transition">ဝင်မည်</a>)}</div></nav>
             <main class="pt-20 pb-10 px-4 max-w-5xl mx-auto">{props.children}</main>
             
-            {/* --- CUSTOM MODALS --- */}
-            
-            {/* Delete Modal */}
             <div id="deleteModal" class="modal-overlay hidden">
                 <div class="modal-box text-center">
                     <div class="w-12 h-12 bg-red-900/30 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4"><i class="fa-solid fa-trash text-xl"></i></div>
@@ -301,7 +349,6 @@ const Layout = (props: { children: any; title?: string; user?: User | null }) =>
                 </div>
             </div>
 
-            {/* Edit Expiry Modal */}
             <div id="editModal" class="modal-overlay hidden">
                 <div class="modal-box">
                     <h3 class="text-lg font-bold text-white mb-4 flex items-center gap-2"><i class="fa-solid fa-clock text-yellow-500"></i> သက်တမ်း ပြင်ဆင်ရန်</h3>
@@ -334,18 +381,29 @@ const Layout = (props: { children: any; title?: string; user?: User | null }) =>
 // 4. MAIN ROUTES
 // =======================
 app.get("/", async (c) => {
-    const cookie = getCookie(c, "auth");
-    if(!cookie) return c.redirect("/login");
-    const user = await getUser(cookie);
-    if(!user) return c.redirect("/login");
+    const session = await getSessionUser(c);
+    if(!session) return c.redirect("/login");
+    const { user, csrfToken } = session;
+    
+    // Check Ban
+    if(user.isBanned) return c.html(<Layout><div class="text-center mt-20 text-red-500 font-bold bg-zinc-900 p-10 rounded-xl border border-red-900">⛔ Your Account is Banned by Admin.</div></Layout>);
 
-    const isVip = isVipActive(user);
     const filterType = c.req.query('type') || 'all';
+    const searchQuery = c.req.query('q')?.toLowerCase();
     const cursor = c.req.query('cursor');
 
-    const iter = kv.list<FileData>({ prefix: ["files", user.username] }, { reverse: true, limit: 30, cursor: cursor });
+    const iter = kv.list<FileData>({ prefix: ["files", user.username] }, { reverse: true, limit: searchQuery ? 100 : 30, cursor: cursor });
     const files = []; let nextCursor = "";
-    for await (const res of iter) { if (filterType === 'all' || res.value.type === filterType) { files.push(res.value); } nextCursor = res.cursor; }
+    
+    for await (const res of iter) { 
+        if(searchQuery) {
+            // Server-side simple search filtering
+            if(res.value.name.toLowerCase().includes(searchQuery)) files.push(res.value);
+        } else {
+            if (filterType === 'all' || res.value.type === filterType) { files.push(res.value); } 
+        }
+        nextCursor = res.cursor; 
+    }
 
     const totalGB = (user.usedStorage / 1024 / 1024 / 1024).toFixed(2);
     const currentPlan = PLANS[user.plan] || PLANS.free;
@@ -354,10 +412,9 @@ app.get("/", async (c) => {
     const usedPercent = Math.min(100, (user.usedStorage / planLimit) * 100);
 
     const now = Date.now();
-    let showWarning = false;
-    if (user.vipExpiry && user.vipExpiry < now) { showWarning = true; }
+    const showWarning = (user.vipExpiry && user.vipExpiry < now);
 
-    return c.html(<Layout user={user}>
+    return c.html(<Layout user={user} csrfToken={csrfToken}>
         {showWarning && (
             <div class="bg-red-900/50 border border-red-600/50 p-4 rounded-xl mb-6 flex items-start gap-3">
                 <i class="fa-solid fa-triangle-exclamation text-red-500 text-xl mt-1"></i>
@@ -368,13 +425,13 @@ app.get("/", async (c) => {
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
             <div class="glass p-5 rounded-2xl relative overflow-hidden group">
                 <p class="text-xs text-zinc-500 uppercase font-bold mb-1">လက်ရှိအစီအစဉ်</p>
-                <p class={`text-2xl font-black ${isVip ? 'text-yellow-500' : 'text-zinc-300'}`}>{currentPlan.name}</p>
+                <p class={`text-2xl font-black ${isVipActive(user) ? 'text-yellow-500' : 'text-zinc-300'}`}>{currentPlan.name}</p>
                 {user.vipExpiry ? (<p class={`text-[10px] mt-2 font-mono px-2 py-1 rounded inline-block ${user.vipExpiry > now ? 'text-green-400 bg-green-900/20' : 'text-red-400 bg-red-900/20'}`}>{user.vipExpiry > now ? `သက်တမ်း: ${formatDate(user.vipExpiry)}` : `ကုန်ဆုံး: ${formatDate(user.vipExpiry)}`}</p>) : <p class="text-[10px] mt-2 text-zinc-500">Free Version</p>}
                 <a href="/change-password" class="absolute bottom-4 right-4 text-xs text-zinc-500 hover:text-white transition"><i class="fa-solid fa-key mr-1"></i> Pass</a>
             </div>
             <div class="glass p-5 rounded-2xl relative">
                 <div class="flex justify-between items-end mb-2"><div><p class="text-xs text-zinc-500 uppercase font-bold">သိုလှောင်ခန်း</p><p class="text-xl font-bold text-white">{totalGB} <span class="text-sm text-zinc-500">GB / {displayLimit}</span></p></div><span class="text-2xl font-black text-zinc-700">{usedPercent.toFixed(0)}%</span></div>
-                <div class="w-full bg-zinc-800 rounded-full h-3 overflow-hidden"><div class={`h-full rounded-full ${isVip ? 'bg-gradient-to-r from-yellow-600 to-yellow-400' : 'bg-zinc-600'}`} style={`width: ${usedPercent}%`}></div></div>
+                <div class="w-full bg-zinc-800 rounded-full h-3 overflow-hidden"><div class={`h-full rounded-full ${isVipActive(user) ? 'bg-gradient-to-r from-yellow-600 to-yellow-400' : 'bg-zinc-600'}`} style={`width: ${usedPercent}%`}></div></div>
             </div>
             <div class="glass p-5 rounded-2xl flex flex-col justify-center gap-2">
                 <div class="text-xs text-zinc-400 mb-1 font-bold uppercase">VIP အကျိုးခံစားခွင့်</div>
@@ -386,7 +443,7 @@ app.get("/", async (c) => {
             </div>
         </div>
 
-        {!isVip && (
+        {!isVipActive(user) && (
         <div class="mb-10">
             <h2 class="text-white font-bold text-lg mb-4 flex items-center gap-2"><i class="fa-solid fa-crown text-yellow-500"></i> VIP အစီအစဉ်များ</h2>
             <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -406,7 +463,7 @@ app.get("/", async (c) => {
             <div class="absolute top-0 left-0 w-1 h-full bg-yellow-500"></div>
             <div class="flex flex-wrap gap-4 mb-6 border-b border-zinc-800 pb-4">
                 <button id="btn-mode-local" onclick="switchUploadMode('local')" class="mode-btn px-4 py-2 text-xs font-bold rounded-lg bg-yellow-500 text-black transition flex items-center gap-2"><i class="fa-solid fa-upload"></i> ဖိုင်တင်မည်</button>
-                <button id="btn-mode-remote" onclick="switchUploadMode('remote')" class="mode-btn px-4 py-2 text-xs font-bold rounded-lg bg-zinc-800 text-gray-400 hover:text-white transition flex items-center gap-2"><i class="fa-solid fa-globe"></i> လင့်ခ်ဖြင့်တင်မည် {isVip ? "" : "(VIP)"}</button>
+                <button id="btn-mode-remote" onclick="switchUploadMode('remote')" class="mode-btn px-4 py-2 text-xs font-bold rounded-lg bg-zinc-800 text-gray-400 hover:text-white transition flex items-center gap-2"><i class="fa-solid fa-globe"></i> လင့်ခ်ဖြင့်တင်မည် {isVipActive(user) ? "" : "(VIP)"}</button>
             </div>
 
             <div id="mode-local" class="upload-mode">
@@ -415,7 +472,7 @@ app.get("/", async (c) => {
                         <div><label class="text-xs font-bold text-zinc-500 uppercase mb-2 block">ဖိုင်နာမည် (Optional)</label><input name="customName" placeholder="ဖိုင်နာမည်..." class="w-full bg-black border border-zinc-700 rounded-xl p-3 text-sm focus:border-yellow-500 outline-none text-white transition" /></div>
                         <div>
                             <label class="text-xs font-bold text-zinc-500 uppercase mb-2 block">သက်တမ်း</label>
-                            {isVip ? (
+                            {isVipActive(user) ? (
                                 <div class="relative">
                                     <select name="expiry" class="w-full bg-black border border-yellow-600/50 rounded-xl p-3 text-sm text-yellow-500 font-bold outline-none appearance-none cursor-pointer">
                                         <option value="0">သက်တမ်းမဲ့ (Lifetime)</option>
@@ -438,7 +495,7 @@ app.get("/", async (c) => {
                     </div>
                     <div class="border-2 border-dashed border-zinc-800 rounded-2xl p-8 text-center hover:border-yellow-500/30 hover:bg-zinc-900 transition cursor-pointer group relative">
                         <input type="file" id="fileInput" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/>
-                        <div class="space-y-2 pointer-events-none"><div class="w-12 h-12 bg-zinc-800 rounded-full flex items-center justify-center mx-auto text-zinc-400 group-hover:text-yellow-500 transition"><i id="uploadIcon" class="fa-solid fa-plus text-xl"></i></div><p id="fileNameDisplay" class="text-sm font-bold text-zinc-300 truncate px-4">ဖိုင်ရွေးချယ်ရန် နှိပ်ပါ</p><p class="text-[10px] text-zinc-500">{isVip ? "Size: Unlimited" : "Size Limit: 50GB"}</p></div>
+                        <div class="space-y-2 pointer-events-none"><div class="w-12 h-12 bg-zinc-800 rounded-full flex items-center justify-center mx-auto text-zinc-400 group-hover:text-yellow-500 transition"><i id="uploadIcon" class="fa-solid fa-plus text-xl"></i></div><p id="fileNameDisplay" class="text-sm font-bold text-zinc-300 truncate px-4">ဖိုင်ရွေးချယ်ရန် နှိပ်ပါ</p><p class="text-[10px] text-zinc-500">{isVipActive(user) ? "Size: Unlimited" : "Size Limit: 50GB"}</p></div>
                     </div>
                     <div id="progressContainer" class="hidden"><div class="flex justify-between text-[10px] uppercase font-bold text-zinc-400 mb-1"><span>Uploading...</span><span id="progressText">0%</span></div><div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="progressBar" class="bg-yellow-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div></div></div>
                     <button id="submitBtn" class="w-full bg-yellow-500 text-black font-bold py-3.5 rounded-xl shadow-lg hover:bg-yellow-400 transition active:scale-95">တင်မည်</button>
@@ -475,7 +532,7 @@ app.get("/", async (c) => {
         <div class="flex flex-col md:flex-row md:items-center justify-between mb-4 gap-4">
             <h3 class="font-bold text-white text-sm uppercase tracking-wide"><i class="fa-solid fa-list-ul mr-2 text-zinc-500"></i> My Files</h3>
             <div class="flex gap-2 w-full md:w-auto">
-                <input id="searchInput" onkeyup="filterFiles()" placeholder="ရှာဖွေရန်..." class="bg-zinc-900 border border-zinc-700 text-white text-xs p-2 rounded-lg outline-none focus:border-yellow-500 w-full md:w-48" />
+                <input id="searchInput" onkeypress="handleSearch(event)" placeholder="Search + Enter..." class="bg-zinc-900 border border-zinc-700 text-white text-xs p-2 rounded-lg outline-none focus:border-yellow-500 w-full md:w-48" value={searchQuery || ''} />
                 <div class="flex bg-zinc-900 p-1 rounded-lg shrink-0">
                     <button onclick="switchTab('all')" class={`px-3 py-1 text-[10px] font-bold rounded-md transition ${filterType === 'all' ? 'bg-yellow-500 text-black' : 'text-gray-400'}`}>ALL</button>
                     <button onclick="switchTab('video')" class={`px-3 py-1 text-[10px] font-bold rounded-md transition ${filterType === 'video' ? 'bg-yellow-500 text-black' : 'text-gray-400'}`}>VID</button>
@@ -506,7 +563,7 @@ app.get("/", async (c) => {
                                 </div>
                             </div>
                             <div class="flex gap-2 w-full md:w-auto justify-end border-t border-zinc-800 pt-2 md:pt-0 md:border-0">
-                                {isVip && <button onclick={`openEditModal('${f.id}')`} class="w-8 h-8 flex items-center justify-center bg-zinc-800 hover:bg-yellow-600 hover:text-black text-gray-300 rounded-lg transition" title="Edit"><i class="fa-solid fa-pen text-xs"></i></button>}
+                                {isVipActive(user) && <button onclick={`openEditModal('${f.id}')`} class="w-8 h-8 flex items-center justify-center bg-zinc-800 hover:bg-yellow-600 hover:text-black text-gray-300 rounded-lg transition" title="Edit"><i class="fa-solid fa-pen text-xs"></i></button>}
                                 <button onclick={`navigator.clipboard.writeText(window.location.origin + '${viewLink}'); this.innerHTML='<i class="fa-solid fa-check text-green-500"></i>'; setTimeout(()=>this.innerHTML='<i class="fa-regular fa-copy"></i>', 1000)`} class="w-8 h-8 flex items-center justify-center bg-zinc-800 hover:bg-white hover:text-black text-gray-300 rounded-lg transition" title="Copy"><i class="fa-regular fa-copy text-xs"></i></button>
                                 {(f.type === 'video' || f.type === 'image') && (<a href={viewLink} target="_blank" title="View" class="w-8 h-8 flex items-center justify-center bg-zinc-800 hover:bg-blue-500 text-white rounded-lg transition"><i class={`fa-solid ${f.type === 'video' ? 'fa-play' : 'fa-eye'} text-xs`}></i></a>)}
                                 <a href={downloadLink} target="_blank" title="Download" class="w-8 h-8 flex items-center justify-center bg-zinc-800 hover:bg-green-600 text-white rounded-lg transition"><i class="fa-solid fa-download text-xs"></i></a>
@@ -526,15 +583,17 @@ app.get("/", async (c) => {
 // 5. API ROUTES
 // =======================
 app.post("/api/upload/presign", async (c) => {
-    const cookie = getCookie(c, "auth"); const user = await getUser(cookie || ""); if(!user) return c.json({error: "Login required"}, 401);
-    const { name, size, server, type, customName } = await c.req.json();
-    const limitBytes = PLANS[user.plan]?.limit || PLANS.free.limit;
-    if (user.usedStorage + size > limitBytes) return c.json({ error: "Storage ပြည့်နေပါသည် (Limit Exceeded)" }, 400);
+    const session = await getSessionUser(c); if(!session) return c.json({error: "Login required"}, 401);
+    const { name, size, server, type, customName, csrf } = await c.req.json();
+    if(csrf !== session.csrfToken) return c.json({error: "Invalid CSRF"}, 403);
+    
+    const limitBytes = PLANS[session.user.plan]?.limit || PLANS.free.limit;
+    if (session.user.usedStorage + size > limitBytes) return c.json({ error: "Storage ပြည့်နေပါသည် (Limit Exceeded)" }, 400);
 
     let finalName = name;
     if (customName) { const ext = name.split('.').pop(); finalName = customName.endsWith('.' + ext) ? customName : customName + '.' + ext; }
     const safeName = finalName.replace(/[^a-zA-Z0-9.-]/g, "_");
-    const r2Key = `${user.username}/${crypto.randomUUID()}-${safeName}`;
+    const r2Key = `${session.user.username}/${crypto.randomUUID()}-${safeName}`;
     const fileId = crypto.randomUUID();
     const client = server === "1" ? s3Server1 : s3Server2;
     const bucket = server === "1" ? Deno.env.get("R2_1_BUCKET_NAME") : Deno.env.get("R2_2_BUCKET_NAME");
@@ -544,27 +603,31 @@ app.post("/api/upload/presign", async (c) => {
 });
 
 app.post("/api/upload/remote", async (c) => {
-    const cookie = getCookie(c, "auth"); const user = await getUser(cookie || "");
-    if(!user || !isVipActive(user)) return c.json({error: "VIP Only"}, 403);
+    const session = await getSessionUser(c);
+    if(!session || !isVipActive(session.user)) return c.json({error: "VIP Only"}, 403);
+    const { url, customName, server, expiry, csrf } = await c.req.json();
+    if(csrf !== session.csrfToken) return c.json({error: "Invalid CSRF"}, 403);
+
+    // SSRF Check
+    if (!isValidRemoteUrl(url)) return c.json({ error: "Invalid URL or Restricted IP" }, 400);
 
     const bodyStream = new ReadableStream({
         async start(controller) {
             const enc = new TextEncoder();
             const push = (d: any) => controller.enqueue(enc.encode(JSON.stringify(d) + "\n"));
             try {
-                const { url, customName, server, expiry } = await c.req.json();
                 const r = await fetch(url);
-                if(!r.ok) throw new Error("URL Error");
+                if(!r.ok) throw new Error("URL fetch failed");
                 const totalSize = parseInt(r.headers.get("content-length") || "0");
-                const limitBytes = PLANS[user.plan]?.limit || PLANS.free.limit;
+                const limitBytes = PLANS[session.user.plan]?.limit || PLANS.free.limit;
                 
                 if(totalSize > MAX_REMOTE_SIZE) throw new Error("File too large (Max 1.5GB)");
-                if(user.usedStorage + totalSize > limitBytes) throw new Error("Storage Full");
+                if(session.user.usedStorage + totalSize > limitBytes) throw new Error("Storage Full");
 
                 const ext = mimeToExt(r.headers.get("content-type") || "") || "bin";
                 const safeName = (customName || "remote").replace(/[^a-zA-Z0-9.-]/g, "_");
                 const fileName = safeName.endsWith('.'+ext) ? safeName : safeName + '.' + ext;
-                const r2Key = `${user.username}/${crypto.randomUUID()}-${fileName}`;
+                const r2Key = `${session.user.username}/${crypto.randomUUID()}-${fileName}`;
                 const fileId = crypto.randomUUID();
                 const client = server === "1" ? s3Server1 : s3Server2;
                 const bucket = server === "1" ? Deno.env.get("R2_1_BUCKET_NAME") : Deno.env.get("R2_2_BUCKET_NAME");
@@ -576,7 +639,7 @@ app.post("/api/upload/remote", async (c) => {
                 const expiryDays = parseInt(expiry) || 0;
                 const type = r.headers.get("content-type")?.startsWith("image/") ? "image" : r.headers.get("content-type")?.startsWith("video/") ? "video" : "other";
                 const fileData: FileData = { id: fileId, name: fileName, sizeBytes: totalSize, size: (totalSize / 1024**2).toFixed(2) + " MB", server, r2Key, uploadedAt: Date.now(), expiresAt: expiryDays > 0 ? Date.now() + (expiryDays * 86400000) : 0, type, isVipFile: true };
-                await kv.atomic().set(["files", user.username, fileId], fileData).set(["users", user.username], { ...user, usedStorage: user.usedStorage + totalSize }).commit();
+                await kv.atomic().set(["files", session.user.username, fileId], fileData).set(["users", session.user.username], { ...session.user, usedStorage: session.user.usedStorage + totalSize }).commit();
                 push({done: true});
             } catch (e: any) { push({error: e.message}); }
             controller.close();
@@ -586,23 +649,27 @@ app.post("/api/upload/remote", async (c) => {
 });
 
 app.post("/api/file/edit", async (c) => {
-    const cookie = getCookie(c, "auth"); const user = await getUser(cookie || "");
-    if(!user || !isVipActive(user)) return c.json({error: "VIP Only"}, 403);
-    const { fileId, days } = await c.req.json();
-    const fileRes = await kv.get<FileData>(["files", user.username, fileId]);
+    const session = await getSessionUser(c);
+    if(!session || !isVipActive(session.user)) return c.json({error: "VIP Only"}, 403);
+    const { fileId, days, csrf } = await c.req.json();
+    if(csrf !== session.csrfToken) return c.json({error: "Invalid CSRF"}, 403);
+    
+    const fileRes = await kv.get<FileData>(["files", session.user.username, fileId]);
     if(!fileRes.value) return c.json({error: "File not found"}, 404);
     
     const file = fileRes.value; const addDays = parseInt(days);
     file.expiresAt = addDays === 0 ? 0 : Date.now() + (addDays * 86400000);
-    await kv.set(["files", user.username, fileId], file);
+    await kv.set(["files", session.user.username, fileId], file);
     return c.json({success: true});
 });
 
 app.post("/api/upload/complete", async (c) => {
-    const cookie = getCookie(c, "auth"); const user = await getUser(cookie || ""); if(!user) return c.json({error: "Unauthorized"}, 401);
-    const { key, fileId, server, expiry } = await c.req.json();
-    const isVip = isVipActive(user);
-    const expiryDays = isVip ? (parseInt(expiry) || 0) : 30; // Free = 30 Days fixed
+    const session = await getSessionUser(c); if(!session) return c.json({error: "Unauthorized"}, 401);
+    const { key, fileId, server, expiry, csrf } = await c.req.json();
+    if(csrf !== session.csrfToken) return c.json({error: "Invalid CSRF"}, 403);
+
+    const isVip = isVipActive(session.user);
+    const expiryDays = isVip ? (parseInt(expiry) || 0) : 30; 
 
     const client = server === "1" ? s3Server1 : s3Server2;
     const bucket = server === "1" ? Deno.env.get("R2_1_BUCKET_NAME") : Deno.env.get("R2_2_BUCKET_NAME");
@@ -612,7 +679,7 @@ app.post("/api/upload/complete", async (c) => {
         const fileName = key.split("-").slice(1).join("-");
         const type = head.ContentType?.startsWith("image/") ? "image" : head.ContentType?.startsWith("video/") ? "video" : "other";
         const fileData: FileData = { id: fileId, name: fileName, sizeBytes, size: (sizeBytes / 1024**2).toFixed(2) + " MB", server, r2Key: key, uploadedAt: Date.now(), expiresAt: expiryDays > 0 ? Date.now() + (expiryDays * 86400000) : 0, type, isVipFile: isVip };
-        await kv.atomic().set(["files", user.username, fileId], fileData).set(["users", user.username], { ...user, usedStorage: user.usedStorage + sizeBytes }).commit();
+        await kv.atomic().set(["files", session.user.username, fileId], fileData).set(["users", session.user.username], { ...session.user, usedStorage: session.user.usedStorage + sizeBytes }).commit();
         return c.json({ success: true });
     } catch(e) { return c.json({ error: "Verification Failed" }, 500); }
 });
@@ -636,32 +703,67 @@ app.get("/d/:server/*", async (c) => {
 // 6. ADMIN PANEL
 // =======================
 app.get("/admin", async (c) => { 
-    const cookie = getCookie(c, "auth"); const currentUser = await getUser(cookie || "");
-    if(!currentUser || currentUser.username !== ADMIN_USERNAME) return c.redirect("/"); 
+    const session = await getSessionUser(c);
+    if(!session || session.user.username !== ADMIN_USERNAME) return c.redirect("/"); 
+    const { user: admin, csrfToken } = session;
+
+    // Search or List
+    const searchUser = c.req.query("u");
+    const users = []; let totalStorage = 0; let userCount = 0;
+    
+    // Performance: Don't iterate everything unless needed for stats (Doing lazy load for list)
+    // For this single-file snippet, we iterate to get totals (OK for <10k users)
     const iter = kv.list<User>({ prefix: ["users"] }); 
-    const users = []; let totalStorage = 0;
-    for await (const res of iter) { users.push(res.value); totalStorage += res.value.usedStorage; }
+    for await (const res of iter) { 
+        userCount++; 
+        totalStorage += res.value.usedStorage;
+        if(searchUser) {
+            if(res.value.username.includes(searchUser)) users.push(res.value);
+        } else {
+            // Limit initial list to 50 to prevent huge page load
+            if(users.length < 50) users.push(res.value);
+        }
+    }
     const totalGB = (totalStorage / 1024**3).toFixed(2);
     
-    return c.html(<Layout title="Admin Panel" user={currentUser}><div class="space-y-6">
+    return c.html(<Layout title="Admin Panel" user={admin} csrfToken={csrfToken}><div class="space-y-6">
         <div class="grid grid-cols-2 gap-3">
-            <div class="glass p-4 rounded-xl border-l-4 border-yellow-500 relative"><p class="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Total Users</p><p class="text-2xl font-black mt-1 text-white">{users.length}</p></div>
+            <div class="glass p-4 rounded-xl border-l-4 border-yellow-500 relative"><p class="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Total Users</p><p class="text-2xl font-black mt-1 text-white">{userCount}</p></div>
             <div class="glass p-4 rounded-xl border-l-4 border-blue-500 relative"><p class="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Storage Used</p><p class="text-2xl font-black mt-1 text-white">{totalGB} <span class="text-sm font-normal text-gray-500">GB</span></p></div>
         </div>
+        
+        {/* Simple Chart Visualization */}
+        <div class="glass p-4 rounded-xl">
+             <div class="w-full bg-zinc-800 h-4 rounded-full overflow-hidden flex">
+                <div style={{width: Math.min(100, (totalStorage / (5000 * 1024**3)) * 100) + '%'}} class="bg-blue-600 h-full"></div>
+             </div>
+             <p class="text-[10px] text-gray-500 mt-1 text-right">Server Load Estimate</p>
+        </div>
+
         <div class="glass rounded-xl overflow-hidden border border-zinc-700/50">
-            <div class="bg-zinc-800/50 px-4 py-3 border-b border-zinc-700 flex items-center justify-between"><h3 class="font-bold text-white text-sm">User Manager</h3><span class="text-[10px] text-gray-500 bg-zinc-900 px-2 py-1 rounded">Scroll >></span></div>
+            <div class="bg-zinc-800/50 px-4 py-3 border-b border-zinc-700 flex items-center justify-between gap-4">
+                <h3 class="font-bold text-white text-sm whitespace-nowrap">User Manager</h3>
+                <form class="flex w-full max-w-xs gap-2">
+                     <input name="u" placeholder="Search User..." value={searchUser || ''} class="bg-black border border-zinc-600 rounded text-xs px-2 py-1 text-white w-full outline-none focus:border-yellow-500" />
+                     <button class="bg-yellow-600 text-black px-3 py-1 rounded text-xs font-bold">Search</button>
+                </form>
+            </div>
             <div class="overflow-x-auto w-full">
                 <table class="w-full text-left text-sm text-gray-400 min-w-[700px]"> 
                     <thead class="bg-zinc-900 text-[10px] uppercase font-bold text-gray-300 tracking-wider"><tr><th class="px-4 py-3">User</th><th class="px-4 py-3">Plan</th><th class="px-4 py-3">Expiry</th><th class="px-4 py-3 text-center">Update Plan</th><th class="px-4 py-3 text-center">Actions</th></tr></thead>
                     <tbody class="divide-y divide-zinc-700/50">{users.map(u => {
                         const planName = PLANS[u.plan]?.name || "Legacy";
                         return (
-                        <tr class="hover:bg-zinc-800/40 transition">
-                            <td class="px-4 py-3 font-bold text-white">{u.username}</td>
+                        <tr class={`hover:bg-zinc-800/40 transition ${u.isBanned ? 'bg-red-900/10' : ''}`}>
+                            <td class="px-4 py-3 font-bold text-white">
+                                {u.username}
+                                {u.isBanned && <span class="ml-2 bg-red-600 text-[9px] px-1 rounded text-white">BANNED</span>}
+                            </td>
                             <td class="px-4 py-3 text-xs">{planName}</td>
                             <td class="px-4 py-3 text-xs">{u.vipExpiry ? formatDate(u.vipExpiry) : '-'}</td>
                             <td class="px-4 py-3 text-center">
                                 <form action="/admin/update-plan" method="post" class="flex gap-1 justify-center">
+                                    <input type="hidden" name="csrf" value={csrfToken} />
                                     <input type="hidden" name="username" value={u.username} />
                                     <select name="plan" class="bg-black border border-zinc-600 rounded text-[10px] py-1 px-2 outline-none w-24">
                                         {Object.keys(PLANS).map(k => <option value={k} selected={u.plan === k}>{PLANS[k].name}</option>)}
@@ -675,8 +777,14 @@ app.get("/admin", async (c) => {
                             <td class="px-4 py-3 flex items-center justify-center gap-2">
                                 <a href={`/admin/files/${u.username}`} class="w-6 h-6 flex items-center justify-center bg-zinc-700 hover:bg-white hover:text-black rounded transition"><i class="fa-solid fa-folder-open text-[10px]"></i></a>
                                 {u.username !== ADMIN_USERNAME && <div class="flex gap-1">
-                                    <form action="/admin/delete-user" method="post" onsubmit="return confirm('Delete user?')"><input type="hidden" name="username" value={u.username} /><button class="w-6 h-6 flex items-center justify-center bg-red-900/50 text-red-500 hover:bg-red-500 hover:text-white rounded"><i class="fa-solid fa-trash text-[10px]"></i></button></form>
-                                    <form action="/admin/reset-pass" method="post" onsubmit="return confirm('Reset pass?')"><input type="hidden" name="username" value={u.username} /><button class="w-6 h-6 flex items-center justify-center bg-blue-900/50 text-blue-500 hover:bg-blue-500 hover:text-white rounded"><i class="fa-solid fa-key text-[10px]"></i></button></form>
+                                    <form action="/admin/ban-user" method="post" onsubmit="return confirm('Ban/Unban user?')">
+                                        <input type="hidden" name="csrf" value={csrfToken} /><input type="hidden" name="username" value={u.username} />
+                                        <button class={`w-6 h-6 flex items-center justify-center rounded ${u.isBanned ? 'bg-green-600 hover:bg-green-500' : 'bg-orange-600 hover:bg-orange-500'} text-white`}>
+                                            <i class={`fa-solid ${u.isBanned ? 'fa-unlock' : 'fa-ban'} text-[10px]`}></i>
+                                        </button>
+                                    </form>
+                                    <form action="/admin/delete-user" method="post" onsubmit="return confirm('Delete user?')"><input type="hidden" name="csrf" value={csrfToken} /><input type="hidden" name="username" value={u.username} /><button class="w-6 h-6 flex items-center justify-center bg-red-900/50 text-red-500 hover:bg-red-500 hover:text-white rounded"><i class="fa-solid fa-trash text-[10px]"></i></button></form>
+                                    <form action="/admin/reset-pass" method="post" onsubmit="return confirm('Reset pass to 123456?')"><input type="hidden" name="csrf" value={csrfToken} /><input type="hidden" name="username" value={u.username} /><button class="w-6 h-6 flex items-center justify-center bg-blue-900/50 text-blue-500 hover:bg-blue-500 hover:text-white rounded"><i class="fa-solid fa-key text-[10px]"></i></button></form>
                                 </div>}
                             </td>
                         </tr>
@@ -686,53 +794,96 @@ app.get("/admin", async (c) => {
         </div>
     </div></Layout>); 
 });
-app.get("/admin/files/:username", async (c) => { const cookie = getCookie(c, "auth"); const admin = await getUser(cookie || ""); if(admin?.username !== ADMIN_USERNAME) return c.redirect("/"); const targetUser = c.req.param("username"); const iter = kv.list<FileData>({ prefix: ["files", targetUser] }, { reverse: true, limit: 100 }); const files = []; for await (const res of iter) files.push(res.value); return c.html(<Layout title={`Files: ${targetUser}`} user={admin}><div class="flex items-center justify-between mb-6"><h2 class="text-xl font-bold text-white"><span class="text-yellow-500">{targetUser}</span>'s Files</h2><a href="/admin" class="bg-zinc-800 px-4 py-2 rounded-lg text-sm hover:bg-zinc-700">Back</a></div><div class="grid grid-cols-2 md:grid-cols-4 gap-4">{files.map(f => (<div class="glass p-3 rounded-xl group relative"><div class="h-24 bg-zinc-900/50 rounded-lg flex items-center justify-center mb-2 overflow-hidden relative">{f.type === 'image' ? (<img src={`/d/${f.server}/${f.r2Key}?action=view`} class="w-full h-full object-cover opacity-70 group-hover:opacity-100 transition" />) : (<i class={`fa-solid ${f.type === 'video' ? 'fa-clapperboard text-blue-500' : 'fa-file text-zinc-600'} text-3xl`}></i>)}</div><p class="text-xs font-bold text-white truncate">{f.name}</p><p class="text-[10px] text-zinc-500">{f.size} • {f.expiresAt ? formatDate(f.expiresAt) : "Lifetime"}</p><div class="absolute inset-0 bg-black/80 flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition rounded-xl"><a href={`/d/${f.server}/${f.r2Key}?action=view`} target="_blank" class="w-8 h-8 flex items-center justify-center bg-blue-600 text-white rounded-full"><i class="fa-solid fa-eye text-xs"></i></a><form action={`/delete/${f.id}`} method="post" onsubmit="return confirm('Delete file?')"><button class="w-8 h-8 flex items-center justify-center bg-red-600 text-white rounded-full"><i class="fa-solid fa-trash text-xs"></i></button></form></div></div>))}</div></Layout>); });
+app.get("/admin/files/:username", async (c) => { 
+    const session = await getSessionUser(c);
+    if(!session || session.user.username !== ADMIN_USERNAME) return c.redirect("/"); 
+    const targetUser = c.req.param("username"); 
+    const iter = kv.list<FileData>({ prefix: ["files", targetUser] }, { reverse: true, limit: 100 }); 
+    const files = []; for await (const res of iter) files.push(res.value); 
+    
+    return c.html(<Layout title={`Files: ${targetUser}`} user={session.user} csrfToken={session.csrfToken}>
+        <div class="flex items-center justify-between mb-6"><h2 class="text-xl font-bold text-white"><span class="text-yellow-500">{targetUser}</span>'s Files</h2><a href="/admin" class="bg-zinc-800 px-4 py-2 rounded-lg text-sm hover:bg-zinc-700">Back</a></div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">{files.map(f => (<div class="glass p-3 rounded-xl group relative"><div class="h-24 bg-zinc-900/50 rounded-lg flex items-center justify-center mb-2 overflow-hidden relative">{f.type === 'image' ? (<img src={`/d/${f.server}/${f.r2Key}?action=view`} class="w-full h-full object-cover opacity-70 group-hover:opacity-100 transition" />) : (<i class={`fa-solid ${f.type === 'video' ? 'fa-clapperboard text-blue-500' : 'fa-file text-zinc-600'} text-3xl`}></i>)}</div><p class="text-xs font-bold text-white truncate">{f.name}</p><p class="text-[10px] text-zinc-500">{f.size} • {f.expiresAt ? formatDate(f.expiresAt) : "Lifetime"}</p><div class="absolute inset-0 bg-black/80 flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition rounded-xl"><a href={`/d/${f.server}/${f.r2Key}?action=view`} target="_blank" class="w-8 h-8 flex items-center justify-center bg-blue-600 text-white rounded-full"><i class="fa-solid fa-eye text-xs"></i></a><form action={`/delete/${f.id}`} method="post" onsubmit="return confirm('Delete file?')"><input type="hidden" name="csrf" value={session.csrfToken} /><button class="w-8 h-8 flex items-center justify-center bg-red-600 text-white rounded-full"><i class="fa-solid fa-trash text-xs"></i></button></form></div></div>))}</div>
+    </Layout>); 
+});
+
+// Admin Actions
+async function checkAdmin(c: any) { const s = await getSessionUser(c); if(s && s.user.username === ADMIN_USERNAME) { const body = await c.req.parseBody(); if(body.csrf === s.csrfToken) return body; } return null; }
 
 app.post("/admin/update-plan", async (c) => { 
-    const cookie = getCookie(c, "auth"); const admin = await getUser(cookie || ""); if(admin?.username !== ADMIN_USERNAME) return c.text("403"); 
-    const { username, plan, months } = await c.req.parseBody(); const user = await getUser(String(username)); 
-    if(user && plan && months) { 
-        user.plan = String(plan) as keyof typeof PLANS;
-        const addMonths = parseInt(String(months));
-        if (addMonths === 0) { user.vipExpiry = undefined; user.plan = 'free'; } // Reset to Free
-        else {
-            const now = Date.now();
-            const currentExp = (user.vipExpiry && user.vipExpiry > now) ? user.vipExpiry : now; 
-            user.vipExpiry = currentExp + (addMonths * 30 * 24 * 60 * 60 * 1000); 
-        }
+    const body = await checkAdmin(c); if(!body) return c.text("403");
+    const user = (await kv.get<User>(["users", String(body.username)])).value; 
+    if(user) { 
+        user.plan = String(body.plan) as keyof typeof PLANS;
+        const addMonths = parseInt(String(body.months));
+        if (addMonths === 0) { user.vipExpiry = undefined; user.plan = 'free'; } 
+        else { const now = Date.now(); const currentExp = (user.vipExpiry && user.vipExpiry > now) ? user.vipExpiry : now; user.vipExpiry = currentExp + (addMonths * 30 * 24 * 60 * 60 * 1000); }
         await kv.set(["users", user.username], user); 
     } 
     return c.redirect("/admin"); 
 });
-app.post("/admin/delete-user", async (c) => { const cookie = getCookie(c, "auth"); const admin = await getUser(cookie || ""); if(admin?.username !== ADMIN_USERNAME) return c.text("403"); const { username } = await c.req.parseBody(); const targetUser = String(username); const iter = kv.list<FileData>({ prefix: ["files", targetUser] }); for await (const res of iter) { await deleteFileFromR2(res.value); await kv.delete(res.key); } await kv.delete(["users", targetUser]); return c.redirect("/admin"); });
-app.post("/admin/reset-pass", async (c) => { const cookie = getCookie(c, "auth"); const admin = await getUser(cookie || ""); if(admin?.username !== ADMIN_USERNAME) return c.text("403"); const { username } = await c.req.parseBody(); const user = await getUser(String(username)); if(user) { user.passwordHash = await hashPassword("123456"); await kv.set(["users", user.username], user); } return c.redirect("/admin"); });
+app.post("/admin/ban-user", async (c) => {
+    const body = await checkAdmin(c); if(!body) return c.text("403");
+    const user = (await kv.get<User>(["users", String(body.username)])).value;
+    if(user && user.username !== ADMIN_USERNAME) { user.isBanned = !user.isBanned; await kv.set(["users", user.username], user); }
+    return c.redirect("/admin");
+});
+app.post("/admin/delete-user", async (c) => { const body = await checkAdmin(c); if(!body) return c.text("403"); const u = String(body.username); const iter = kv.list<FileData>({ prefix: ["files", u] }); for await (const res of iter) { await deleteFileFromR2(res.value); await kv.delete(res.key); } await kv.delete(["users", u]); return c.redirect("/admin"); });
+app.post("/admin/reset-pass", async (c) => { const body = await checkAdmin(c); if(!body) return c.text("403"); const u = String(body.username); const user = (await kv.get<User>(["users", u])).value; if(user) { user.passwordHash = await hashPassword("123456"); await kv.set(["users", u], user); } return c.redirect("/admin"); });
+
 async function deleteFileFromR2(f: FileData) { const bucket = Deno.env.get(`R2_${f.server}_BUCKET_NAME`); const client = f.server === "1" ? s3Server1 : s3Server2; try { await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: f.r2Key })); } catch (e) {} }
-app.post("/delete/:id", async (c) => { const cookie = getCookie(c, "auth"); const user = await getUser(cookie || ""); if(!user) return c.redirect("/login"); const id = c.req.param("id"); const fileRes = await kv.get<FileData>(["files", user.username, id]); if (fileRes.value) { await deleteFileFromR2(fileRes.value); await kv.atomic().delete(["files", user.username, id]).set(["users", user.username], { ...user, usedStorage: Math.max(0, user.usedStorage - fileRes.value.sizeBytes) }).commit(); } return c.redirect("/"); });
+
+app.post("/delete/:id", async (c) => { 
+    const session = await getSessionUser(c); if(!session) return c.redirect("/login");
+    const { csrf } = await c.req.parseBody(); if(csrf !== session.csrfToken) return c.text("Invalid CSRF", 403);
+    
+    const id = c.req.param("id"); 
+    const fileRes = await kv.get<FileData>(["files", session.user.username, id]); 
+    if (fileRes.value) { await deleteFileFromR2(fileRes.value); await kv.atomic().delete(["files", session.user.username, id]).set(["users", session.user.username], { ...session.user, usedStorage: Math.max(0, session.user.usedStorage - fileRes.value.sizeBytes) }).commit(); } 
+    return c.redirect("/"); 
+});
 
 // =======================
-// 7. AUTH
+// 7. AUTH ROUTES
 // =======================
 app.get("/login", (c) => c.html(<Layout title="Login"><div class="max-w-sm mx-auto mt-24 glass p-8 rounded-2xl border border-zinc-700"><h1 class="text-3xl font-black mb-2 text-center text-yellow-500 italic">GOLD STORAGE</h1><form action="/login" method="post" class="space-y-4"><input name="username" placeholder="အမည် (Username)" required class="w-full bg-black border border-zinc-700 p-3 rounded-xl text-white outline-none focus:border-yellow-500" /><input type="password" name="password" placeholder="စကားဝှက် (Password)" required class="w-full bg-black border border-zinc-700 p-3 rounded-xl text-white outline-none focus:border-yellow-500" /><button class="w-full bg-yellow-500 text-black font-bold py-3 rounded-xl hover:bg-yellow-400">ဝင်မည်</button></form><p class="text-center text-xs mt-6 text-zinc-500">အကောင့်မရှိဘူးလား? <a href="/register" class="text-yellow-500 font-bold hover:underline">အကောင့်သစ်ဖွင့်မယ်</a></p></div></Layout>));
-app.post("/login", async (c) => { const { username, password } = await c.req.parseBody(); const u = String(username).trim(); const user = await getUser(u); if (user && user.passwordHash === await hashPassword(String(password).trim())) { setCookie(c, "auth", u, { path: "/", httpOnly: true, secure: true, sameSite: "Strict", maxAge: 86400 * 30 }); return c.redirect("/"); } return c.html(<Layout><p class="text-center text-red-500 mt-20">Login Failed.</p></Layout>); });
+app.post("/login", async (c) => { 
+    const { username, password } = await c.req.parseBody(); 
+    const u = String(username).trim(); 
+    const userRes = await kv.get<User>(["users", u]);
+    if (userRes.value && userRes.value.passwordHash === await hashPassword(String(password).trim())) { 
+        await createSession(c, u);
+        return c.redirect("/"); 
+    } 
+    return c.html(<Layout><p class="text-center text-red-500 mt-20">Login Failed.</p><div class="text-center mt-4"><a href="/login" class="text-white bg-zinc-800 px-4 py-2 rounded">Try Again</a></div></Layout>); 
+});
 app.get("/register", (c) => c.html(<Layout title="Register"><div class="max-w-sm mx-auto mt-24 glass p-8 rounded-2xl border border-zinc-700"><h1 class="text-xl font-bold mb-6 text-center text-white">အကောင့်သစ်ဖွင့်မည်</h1><form action="/register" method="post" class="space-y-4"><input name="username" placeholder="Username" required class="w-full bg-black border border-zinc-700 p-3 rounded-xl text-white" /><input type="password" name="password" placeholder="Password" required class="w-full bg-black border border-zinc-700 p-3 rounded-xl text-white" /><button class="w-full bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold text-white">စာရင်းသွင်းမည်</button></form></div></Layout>));
-app.post("/register", async (c) => { const { username, password } = await c.req.parseBody(); const u = String(username).trim(); if (await getUser(u)) return c.html(<Layout><p class="text-center text-red-500 mt-20">Username Taken.</p></Layout>); const newUser: User = { username: u, passwordHash: await hashPassword(String(password)), plan: 'free', isVip: false, usedStorage: 0, createdAt: Date.now() }; await kv.set(["users", u], newUser); return c.redirect("/login"); });
-app.get("/logout", (c) => { deleteCookie(c, "auth"); return c.redirect("/login"); });
+app.post("/register", async (c) => { 
+    const { username, password } = await c.req.parseBody(); const u = String(username).trim(); 
+    if ((await kv.get(["users", u])).value) return c.html(<Layout><p class="text-center text-red-500 mt-20">Username Taken.</p></Layout>); 
+    const newUser: User = { username: u, passwordHash: await hashPassword(String(password)), plan: 'free', isVip: false, usedStorage: 0, createdAt: Date.now() }; 
+    await kv.set(["users", u], newUser); return c.redirect("/login"); 
+});
+app.get("/logout", async (c) => { const sid = getCookie(c, "session_id"); if(sid) await kv.delete(["sessions", sid]); deleteCookie(c, "session_id"); return c.redirect("/login"); });
+
 app.get("/change-password", (c) => c.html(<Layout title="Change Password"><div class="max-w-sm mx-auto mt-20 glass p-8 rounded-xl"><h1 class="text-xl font-bold mb-4 text-white">စကားဝှက်ပြောင်းမည်</h1><form action="/change-password" method="post" class="space-y-4"><input type="password" name="newpass" placeholder="New Password" required class="w-full bg-black border border-zinc-700 p-3 rounded-xl text-white" /><button class="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded-xl font-bold text-white">အတည်ပြုမည်</button></form><a href="/" class="block text-center mt-4 text-xs text-gray-400">Back</a></div></Layout>));
-app.post("/change-password", async (c) => { const cookie = getCookie(c, "auth"); const user = await getUser(cookie || ""); if(!user) return c.redirect("/login"); const { newpass } = await c.req.parseBody(); if(String(newpass).length < 6) return c.text("Min 6 chars"); user.passwordHash = await hashPassword(String(newpass)); await kv.set(["users", user.username], user); return c.html(<Layout><div class="text-center mt-20"><p class="text-green-500 text-xl font-bold mb-4">Success!</p><a href="/" class="bg-zinc-800 px-4 py-2 rounded-lg text-sm text-white">Home</a></div></Layout>); });
+app.post("/change-password", async (c) => { 
+    const session = await getSessionUser(c); if(!session) return c.redirect("/login");
+    const { newpass } = await c.req.parseBody(); if(String(newpass).length < 6) return c.text("Min 6 chars"); 
+    session.user.passwordHash = await hashPassword(String(newpass)); await kv.set(["users", session.user.username], session.user); 
+    return c.html(<Layout><div class="text-center mt-20"><p class="text-green-500 text-xl font-bold mb-4">Success!</p><a href="/" class="bg-zinc-800 px-4 py-2 rounded-lg text-sm text-white">Home</a></div></Layout>); 
+});
+
+// Cron Cleanup
 Deno.cron("Cleanup", "0 * * * *", async () => { 
     const now = Date.now(); 
     const iter = kv.list<FileData>({ prefix: ["files"] }); 
     for await (const entry of iter) { 
-        const file = entry.value; 
-        const username = entry.key[1] as string;
-        const uRes = await kv.get<User>(["users", username]);
+        const file = entry.value; const username = entry.key[1] as string; const uRes = await kv.get<User>(["users", username]);
         if (uRes.value) {
             const user = uRes.value;
             if (file.expiresAt > 0 && file.expiresAt < now) { await deleteFileAndRecord(file, user, entry.key); continue; }
-            if (user.vipExpiry && user.vipExpiry < now) {
-                const gracePeriodEnd = user.vipExpiry + (7 * 24 * 60 * 60 * 1000);
-                if (now > gracePeriodEnd) await deleteFileAndRecord(file, user, entry.key);
-            }
+            if (user.vipExpiry && user.vipExpiry < now) { const gracePeriodEnd = user.vipExpiry + (7 * 24 * 60 * 60 * 1000); if (now > gracePeriodEnd) await deleteFileAndRecord(file, user, entry.key); }
         } else { await kv.delete(entry.key); } 
     } 
 });
