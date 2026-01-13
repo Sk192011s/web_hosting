@@ -8,16 +8,16 @@ const app = new Hono();
 const kv = await Deno.openKv();
 
 // =======================
-// 1. CONFIG
+// 1. CONFIG (ဒီနေရာတွေ ပြင်ပါ)
 // =======================
-const ADMIN_USERNAME = "soekyawwin"; // <--- ဒီနေရာမှာ Admin Username ပြင်ပါ
-const SECRET_KEY = Deno.env.get("SECRET_SALT") || "change-this-secret-key-to-something-long";
+const ADMIN_USERNAME = "soekyawwin"; // <--- Admin Username ထည့်ပါ
+const SECRET_KEY = Deno.env.get("SECRET_SALT") || "change-this-secret-key-to-secure-one";
 
 // Storage Quota
 const FREE_STORAGE_LIMIT = 50 * 1024 * 1024 * 1024; // 50 GB (Free User)
 const VIP_STORAGE_LIMIT = 100 * 1024 * 1024 * 1024; // 100 GB (VIP User)
 
-// S3 Clients
+// S3 Clients (Cloudflare R2 Setup)
 const s3Server1 = new S3Client({
   region: "auto",
   endpoint: `https://${Deno.env.get("R2_1_ACCOUNT_ID")}.r2.cloudflarestorage.com`,
@@ -37,11 +37,12 @@ const s3Server2 = new S3Client({
 });
 
 // =======================
-// 2. HELPERS (Security & Types)
+// 2. HELPERS (Security & Logic)
 // =======================
 interface User { username: string; passwordHash: string; isVip: boolean; vipExpiry?: number; usedStorage: number; createdAt: number; }
 interface FileData { id: string; name: string; sizeBytes: number; size: string; server: "1" | "2"; r2Key: string; uploadedAt: number; expiresAt: number; type: "image" | "video" | "other"; isVipFile: boolean; }
 
+// PBKDF2 Password Hashing
 async function hashPassword(password: string) {
     const enc = new TextEncoder();
     const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(password), { name: "PBKDF2" }, false, ["deriveBits", "deriveKey"]);
@@ -95,7 +96,7 @@ const mainScript = `
         const file = fileInput.files[0];
 
         submitBtn.disabled = true;
-        submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Checking Permissions...';
+        submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Checking...';
         progressContainer.classList.remove('hidden');
 
         try {
@@ -110,7 +111,6 @@ const mainScript = `
                     type: file.type,
                     size: file.size,
                     server: formData.get("server"),
-                    expiry: formData.get("expiry"),
                     customName: formData.get("customName")
                 })
             });
@@ -118,7 +118,7 @@ const mainScript = `
             if (!presignRes.ok) throw new Error(await presignRes.text());
             const { url, key, fileId } = await presignRes.json();
 
-            // 2. Upload to Cloud (R2)
+            // 2. Upload to Cloud (Directly to R2)
             submitBtn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> Uploading...';
             
             const xhr = new XMLHttpRequest();
@@ -151,9 +151,9 @@ const mainScript = `
                     progressBar.classList.add('bg-green-500');
                     submitBtn.innerHTML = '<i class="fa-solid fa-check"></i> Success!';
                     setTimeout(() => window.location.reload(), 1000);
-                } else { throw new Error("Upload Failed to R2"); }
+                } else { throw new Error("Upload Failed to Cloud"); }
             };
-            xhr.onerror = () => { throw new Error("Network Connection Failed"); };
+            xhr.onerror = () => { throw new Error("Connection Failed"); };
             xhr.send(file);
 
         } catch (error) {
@@ -186,7 +186,7 @@ const Layout = (props: { children: any; title?: string; user?: User | null }) =>
 );
 
 // =======================
-// 4. MAIN ROUTE (Dashboard)
+// 4. MAIN DASHBOARD ROUTE
 // =======================
 app.get("/", async (c) => {
     const cookie = getCookie(c, "auth");
@@ -198,6 +198,7 @@ app.get("/", async (c) => {
     const filterType = c.req.query('type') || 'all';
     const cursor = c.req.query('cursor');
 
+    // Pagination: Load 20 files
     const iter = kv.list<FileData>({ prefix: ["files", user.username] }, { reverse: true, limit: 20, cursor: cursor });
     const files = [];
     let nextCursor = "";
@@ -213,12 +214,14 @@ app.get("/", async (c) => {
     const usedPercent = Math.min(100, (user.usedStorage / limitBytes) * 100);
 
     return c.html(<Layout user={user}>
+        {/* Status Cards */}
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
             <div class="glass p-5 rounded-2xl relative overflow-hidden group"><p class="text-xs text-zinc-400 uppercase font-bold mb-1">အကောင့်</p><p class={`text-2xl font-black ${isVip ? 'text-yellow-500' : 'text-zinc-300'}`}>{isVip ? "VIP PRO" : "Free Plan"}</p>{isVip && user.vipExpiry && <p class="text-[10px] text-green-400 mt-2 font-mono bg-green-900/20 inline-block px-2 py-1 rounded">EXP: {formatDate(user.vipExpiry)}</p>}<a href="/change-password" class="absolute bottom-4 right-4 text-xs text-zinc-500 hover:text-white transition"><i class="fa-solid fa-key mr-1"></i> Pass</a></div>
             <div class="glass p-5 rounded-2xl relative"><div class="flex justify-between items-end mb-2"><div><p class="text-xs text-zinc-400 uppercase font-bold">Storage</p><p class="text-xl font-bold text-white">{totalGB} <span class="text-sm text-zinc-500">GB / {displayLimit}</span></p></div><span class="text-2xl font-black text-zinc-600">{usedPercent.toFixed(0)}%</span></div><div class="w-full bg-zinc-800 rounded-full h-3 overflow-hidden"><div class={`h-full rounded-full ${isVip ? 'bg-gradient-to-r from-yellow-600 to-yellow-400' : 'bg-zinc-500'}`} style={`width: ${usedPercent}%`}></div></div></div>
             <div class="glass p-5 rounded-2xl flex items-center justify-between"><div><p class="text-xs text-zinc-400 uppercase font-bold">Status</p><p class="text-sm font-bold text-green-500">Active</p></div><div class="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-500 text-2xl"><i class="fa-solid fa-signal"></i></div></div>
         </div>
         
+        {/* Upload Form */}
         <div class="glass p-6 rounded-2xl mb-8 border border-zinc-700/50 shadow-2xl">
             <h2 class="font-bold text-lg mb-6 flex items-center gap-2 text-white"><span class="bg-blue-600 w-8 h-8 rounded-lg flex items-center justify-center text-sm"><i class="fa-solid fa-cloud-arrow-up"></i></span> Direct Upload</h2>
             <form id="uploadForm" onsubmit="uploadFile(event)" class="space-y-5">
@@ -254,21 +257,35 @@ app.get("/", async (c) => {
             </form>
         </div>
 
+        {/* File List */}
         <div class="flex items-center justify-between mb-4"><h3 class="font-bold text-white text-sm uppercase tracking-wide"><i class="fa-solid fa-list-ul mr-2 text-zinc-500"></i> My Files</h3><div class="flex bg-zinc-900 p-1 rounded-lg"><button onclick="switchTab('all')" class={`px-3 py-1 text-[10px] font-bold rounded-md transition ${filterType === 'all' ? 'bg-yellow-500 text-black' : 'text-gray-400'}`}>ALL</button><button onclick="switchTab('video')" class={`px-3 py-1 text-[10px] font-bold rounded-md transition ${filterType === 'video' ? 'bg-yellow-500 text-black' : 'text-gray-400'}`}>VIDEO</button><button onclick="switchTab('image')" class={`px-3 py-1 text-[10px] font-bold rounded-md transition ${filterType === 'image' ? 'bg-yellow-500 text-black' : 'text-gray-400'}`}>IMG</button></div></div>
         
         <div class="glass rounded-2xl overflow-hidden border border-zinc-700/50">
             <div class="max-h-[600px] overflow-y-auto custom-scroll p-2 space-y-2">
                 {files.map(f => {
                     const downloadLink = `/d/${f.server}/${f.r2Key}`;
+                    const viewLink = `/d/${f.server}/${f.r2Key}?action=view`; // View Link for Streaming
+
                     return (
                     <div class={`bg-zinc-800/50 hover:bg-zinc-800 p-3 rounded-xl flex justify-between items-center group transition border border-transparent hover:border-zinc-600`}>
                         <div class="flex items-center gap-4 overflow-hidden">
                             <div class={`w-10 h-10 rounded-lg flex items-center justify-center text-lg flex-shrink-0 ${f.type === 'image' ? 'bg-yellow-500/10 text-yellow-500' : f.type === 'video' ? 'bg-blue-500/10 text-blue-500' : 'bg-zinc-700 text-zinc-400'}`}><i class={`fa-solid ${f.type === 'image' ? 'fa-image' : f.type === 'video' ? 'fa-clapperboard' : 'fa-file'}`}></i></div>
-                            <div class="min-w-0"><p class="font-bold text-sm truncate text-zinc-200 group-hover:text-white transition">{f.name}</p><div class="flex items-center gap-3 text-[10px] text-zinc-500 font-mono mt-0.5"><span class="bg-zinc-900 px-1.5 rounded text-zinc-400">{f.size}</span><span>{formatDate(f.uploadedAt)}</span>{f.expiresAt > 0 ? (<span class="text-red-400 bg-red-900/10 px-1.5 rounded">Exp: {formatDate(f.expiresAt)}</span>) : (<span class="text-green-500 bg-green-900/10 px-1.5 rounded">Lifetime</span>)}</div></div>
+                            <div class="min-w-0">
+                                <a href={viewLink} target="_blank" class="font-bold text-sm truncate text-zinc-200 group-hover:text-yellow-500 transition hover:underline">{f.name}</a>
+                                <div class="flex items-center gap-3 text-[10px] text-zinc-500 font-mono mt-0.5"><span class="bg-zinc-900 px-1.5 rounded text-zinc-400">{f.size}</span><span>{formatDate(f.uploadedAt)}</span>{f.expiresAt > 0 ? (<span class="text-red-400 bg-red-900/10 px-1.5 rounded">Exp: {formatDate(f.expiresAt)}</span>) : (<span class="text-green-500 bg-green-900/10 px-1.5 rounded">Lifetime</span>)}</div>
+                            </div>
                         </div>
                         <div class="flex gap-2 opacity-80 group-hover:opacity-100 transition">
-                            <a href={downloadLink} target="_blank" class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-blue-600 text-white rounded-lg transition"><i class="fa-solid fa-download text-xs"></i></a>
-                            <button onclick={`navigator.clipboard.writeText(window.location.origin + '${downloadLink}'); this.innerHTML='<i class="fa-solid fa-check"></i>'; setTimeout(()=>this.innerHTML='<i class="fa-regular fa-copy"></i>', 1000)`} class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-green-600 text-white rounded-lg transition"><i class="fa-regular fa-copy text-xs"></i></button>
+                            {/* Copy Link Button */}
+                            <button onclick={`navigator.clipboard.writeText(window.location.origin + '${viewLink}'); this.innerHTML='<i class="fa-solid fa-check text-green-500"></i>'; setTimeout(()=>this.innerHTML='<i class="fa-regular fa-copy"></i>', 1000)`} class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-white hover:text-black text-white rounded-lg transition" title="Copy Stream Link"><i class="fa-regular fa-copy text-xs"></i></button>
+                            
+                            {/* View/Play Button */}
+                            {(f.type === 'video' || f.type === 'image') && (<a href={viewLink} target="_blank" title="Play/View" class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-blue-500 text-white rounded-lg transition"><i class={`fa-solid ${f.type === 'video' ? 'fa-play' : 'fa-eye'} text-xs`}></i></a>)}
+                            
+                            {/* Download Button */}
+                            <a href={downloadLink} target="_blank" title="Download" class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-green-600 text-white rounded-lg transition"><i class="fa-solid fa-download text-xs"></i></a>
+                            
+                            {/* Delete Button */}
                             <form action={`/delete/${f.id}`} method="post" onsubmit="return confirm('ဖျက်မှာသေချာလား?')"><button class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-red-600 text-white rounded-lg transition"><i class="fa-solid fa-trash text-xs"></i></button></form>
                         </div>
                     </div>
@@ -281,7 +298,7 @@ app.get("/", async (c) => {
 });
 
 // =======================
-// 5. API: DIRECT UPLOAD
+// 5. API ROUTES (Direct Upload)
 // =======================
 app.post("/api/upload/presign", async (c) => {
     const cookie = getCookie(c, "auth");
@@ -321,7 +338,7 @@ app.post("/api/upload/complete", async (c) => {
     const { key, fileId, server, expiry } = await c.req.json();
     const isVip = checkVipStatus(user);
     
-    // Logic: Free users forced to 30 days. VIP can choose (0 = lifetime).
+    // Logic: Free users = 30 days mandatory. VIP = user choice.
     const expiryDays = isVip ? (parseInt(expiry) || 0) : 30;
 
     const client = server === "1" ? s3Server1 : s3Server2;
@@ -350,25 +367,29 @@ app.post("/api/upload/complete", async (c) => {
 });
 
 // =======================
-// 6. DOWNLOAD (Redirect)
+// 6. DOWNLOAD & STREAM ROUTE
 // =======================
 app.get("/d/:server/*", async (c) => {
     const server = c.req.param("server");
     const rawKey = c.req.path.split(`/d/${server}/`)[1]; 
     if (!rawKey) return c.text("Invalid Key", 400);
 
+    // Check ?action=view for streaming (inline), else download (attachment)
+    const action = c.req.query("action");
+    const disposition = action === "view" ? "inline" : "attachment";
+
     const client = server === "1" ? s3Server1 : s3Server2;
     const bucket = server === "1" ? Deno.env.get("R2_1_BUCKET_NAME") : Deno.env.get("R2_2_BUCKET_NAME");
 
     try {
-        const command = new GetObjectCommand({ Bucket: bucket, Key: rawKey, ResponseContentDisposition: 'attachment' });
+        const command = new GetObjectCommand({ Bucket: bucket, Key: rawKey, ResponseContentDisposition: disposition });
         const url = await getSignedUrl(client, command, { expiresIn: 3600 });
         return c.redirect(url);
     } catch (e) { return c.text("File Not Found", 404); }
 });
 
 // =======================
-// 7. ADMIN PANEL (Mobile Responsive & Inspector)
+// 7. ADMIN PANEL
 // =======================
 app.get("/admin", async (c) => { 
     const cookie = getCookie(c, "auth"); 
@@ -402,10 +423,12 @@ app.get("/admin", async (c) => {
                                     <td class="px-4 py-3 text-xs font-mono">{(u.usedStorage/1024/1024).toFixed(2)} MB</td>
                                     <td class="px-4 py-3">{checkVipStatus(u) ? <span class="bg-yellow-500/10 text-yellow-500 px-2 py-0.5 rounded text-[10px] font-bold">VIP</span> : <span class="bg-zinc-700/50 px-2 py-0.5 rounded text-[10px]">Free</span>}</td>
                                     <td class="px-4 py-3 flex items-center justify-center gap-2">
+                                        {/* Inspect Files */}
                                         <a href={`/admin/files/${u.username}`} class="w-6 h-6 flex items-center justify-center bg-zinc-700 hover:bg-white hover:text-black rounded transition"><i class="fa-solid fa-folder-open text-[10px]"></i></a>
+                                        {/* VIP Controls */}
                                         <form action="/admin/vip" method="post"><input type="hidden" name="username" value={u.username} /><select name="days" onchange="this.form.submit()" class="bg-black/40 border border-zinc-600 rounded text-[10px] py-1 px-2 outline-none w-20"><option value="">VIP...</option><option value="30">1 Mo</option><option value="150">5 Mo</option><option value="365">1 Yr</option><option value="-1">Rm</option></select></form>
                                         {u.username !== ADMIN_USERNAME && <div class="flex gap-1">
-                                            <form action="/admin/delete-user" method="post" onsubmit="return confirm('Delete user & files?')"><input type="hidden" name="username" value={u.username} /><button class="w-6 h-6 flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white rounded"><i class="fa-solid fa-trash text-[10px]"></i></button></form>
+                                            <form action="/admin/delete-user" method="post" onsubmit="return confirm('Delete user & all files?')"><input type="hidden" name="username" value={u.username} /><button class="w-6 h-6 flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white rounded"><i class="fa-solid fa-trash text-[10px]"></i></button></form>
                                             <form action="/admin/reset-pass" method="post" onsubmit="return confirm('Reset pass to 123456?')"><input type="hidden" name="username" value={u.username} /><button class="w-6 h-6 flex items-center justify-center bg-blue-500/10 text-blue-500 hover:bg-blue-500 hover:text-white rounded"><i class="fa-solid fa-key text-[10px]"></i></button></form>
                                         </div>}
                                     </td>
@@ -419,6 +442,7 @@ app.get("/admin", async (c) => {
     </Layout>); 
 });
 
+// Admin: Inspect Files
 app.get("/admin/files/:username", async (c) => {
     const cookie = getCookie(c, "auth");
     const admin = await getUser(cookie || "");
@@ -436,12 +460,12 @@ app.get("/admin/files/:username", async (c) => {
                 {files.map(f => (
                     <div class="glass p-3 rounded-xl group relative">
                         <div class="h-24 bg-zinc-900/50 rounded-lg flex items-center justify-center mb-2 overflow-hidden relative">
-                            {f.type === 'image' ? (<img src={`/d/${f.server}/${f.r2Key}`} class="w-full h-full object-cover opacity-70 group-hover:opacity-100 transition" />) : (<i class={`fa-solid ${f.type === 'video' ? 'fa-clapperboard text-blue-500' : 'fa-file text-zinc-600'} text-3xl`}></i>)}
+                            {f.type === 'image' ? (<img src={`/d/${f.server}/${f.r2Key}?action=view`} class="w-full h-full object-cover opacity-70 group-hover:opacity-100 transition" />) : (<i class={`fa-solid ${f.type === 'video' ? 'fa-clapperboard text-blue-500' : 'fa-file text-zinc-600'} text-3xl`}></i>)}
                         </div>
                         <p class="text-xs font-bold text-white truncate">{f.name}</p>
                         <p class="text-[10px] text-zinc-500">{f.size} • {f.expiresAt ? formatDate(f.expiresAt) : "Lifetime"}</p>
                         <div class="absolute inset-0 bg-black/80 flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition rounded-xl">
-                            <a href={`/d/${f.server}/${f.r2Key}`} target="_blank" class="w-8 h-8 flex items-center justify-center bg-blue-600 text-white rounded-full"><i class="fa-solid fa-download text-xs"></i></a>
+                            <a href={`/d/${f.server}/${f.r2Key}?action=view`} target="_blank" class="w-8 h-8 flex items-center justify-center bg-blue-600 text-white rounded-full"><i class="fa-solid fa-eye text-xs"></i></a>
                             <form action={`/delete/${f.id}`} method="post" onsubmit="return confirm('Delete file?')"><button class="w-8 h-8 flex items-center justify-center bg-red-600 text-white rounded-full"><i class="fa-solid fa-trash text-xs"></i></button></form>
                         </div>
                     </div>
@@ -496,7 +520,7 @@ app.post("/delete/:id", async (c) => {
 });
 
 // =======================
-// 8. AUTH
+// 8. AUTH ROUTES
 // =======================
 app.get("/login", (c) => c.html(<Layout title="Login"><div class="max-w-sm mx-auto mt-24 glass p-8 rounded-2xl border border-zinc-700"><h1 class="text-3xl font-black mb-2 text-center text-yellow-500 italic">GOLD STORAGE</h1><form action="/login" method="post" class="space-y-4"><input name="username" placeholder="Username" required class="w-full bg-zinc-900 border border-zinc-700 p-3 rounded-xl text-white" /><input type="password" name="password" placeholder="Password" required class="w-full bg-zinc-900 border border-zinc-700 p-3 rounded-xl text-white" /><button class="w-full bg-gradient-to-r from-yellow-600 to-yellow-500 text-black font-bold py-3 rounded-xl hover:brightness-110">ဝင်မည်</button></form><p class="text-center text-xs mt-6 text-zinc-500">အကောင့်မရှိဘူးလား? <a href="/register" class="text-yellow-500 font-bold hover:underline">အကောင့်သစ်ဖွင့်မယ်</a></p></div></Layout>));
 app.post("/login", async (c) => { 
@@ -522,7 +546,7 @@ app.post("/change-password", async (c) => {
 });
 
 // =======================
-// 9. CRON: AUTO CLEANUP
+// 9. CRON: AUTO CLEANUP (HOURLY)
 // =======================
 Deno.cron("Cleanup", "0 * * * *", async () => {
     const now = Date.now();
