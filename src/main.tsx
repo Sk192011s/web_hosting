@@ -11,11 +11,10 @@ const kv = await Deno.openKv();
 // =======================
 // 1. CONFIGURATION
 // =======================
-const ADMIN_USERNAME = "soekyawwin"; // <--- Admin Username
+const ADMIN_USERNAME = "soekyawwin"; 
 const SECRET_KEY = Deno.env.get("SECRET_SALT") || "change-this-secret-key-securely";
 const MAX_REMOTE_SIZE = 1.5 * 1024 * 1024 * 1024; // 1.5 GB
 
-// Plan Definitions
 const PLANS = {
     free:  { limit: 50 * 1024 * 1024 * 1024, name: "Free Plan" },
     vip50: { limit: 50 * 1024 * 1024 * 1024, name: "50 GB VIP" },
@@ -39,15 +38,7 @@ const s3Server2 = new S3Client({
 // =======================
 // 2. TYPES & HELPERS
 // =======================
-interface User { 
-    username: string; 
-    passwordHash: string; 
-    plan: keyof typeof PLANS; 
-    isVip: boolean; // Keep for backward compatibility
-    vipExpiry?: number; 
-    usedStorage: number; 
-    createdAt: number; 
-}
+interface User { username: string; passwordHash: string; plan: keyof typeof PLANS; isVip: boolean; vipExpiry?: number; usedStorage: number; createdAt: number; }
 interface FileData { id: string; name: string; sizeBytes: number; size: string; server: "1" | "2"; r2Key: string; uploadedAt: number; expiresAt: number; type: "image" | "video" | "other"; isVipFile: boolean; }
 
 async function hashPassword(password: string) {
@@ -57,38 +48,24 @@ async function hashPassword(password: string) {
     const exported = await crypto.subtle.exportKey("raw", key);
     return Array.from(new Uint8Array(exported)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
-
-// 🔥 FIXED: GET USER WITH AUTO MIGRATION (Web ဝင်မရတာ ဒါကြောင့်ပါ)
 async function getUser(username: string) { 
     const res = await kv.get<User>(["users", username]); 
     if (!res.value) return null;
-
     const user = res.value;
-    
-    // အကယ်၍ User အဟောင်းဖြစ်နေပြီး Plan မရှိသေးရင် Auto ထည့်ပေးမယ်
-    if (!user.plan || !PLANS[user.plan]) {
-        // အရင်က VIP ဖြစ်ခဲ့ရင် vip50 ပေးမယ်၊ မဟုတ်ရင် free ပေးမယ်
-        user.plan = user.isVip ? 'vip50' : 'free';
-        // Database ကို Update လုပ်မယ်
-        await kv.set(["users", username], user);
-    }
-    
+    if (!user.plan || !PLANS[user.plan]) { user.plan = user.isVip ? 'vip50' : 'free'; await kv.set(["users", username], user); }
     return user; 
 }
-
-function isVipActive(user: User): boolean { 
-    if (user.plan === 'free') return false;
-    return user.vipExpiry ? user.vipExpiry > Date.now() : false; 
-}
+function isVipActive(user: User): boolean { if (user.plan === 'free') return false; return user.vipExpiry ? user.vipExpiry > Date.now() : false; }
 function formatDate(ts: number) { return new Date(ts).toLocaleDateString('my-MM', { day: 'numeric', month: 'short', year: 'numeric' }); }
 function mimeToExt(mime: string): string { const m: any = {'video/mp4':'mp4','video/webm':'webm','video/x-matroska':'mkv','image/jpeg':'jpg','image/png':'png'}; return m[mime.split(';')[0]] || 'bin'; }
 
 // =======================
-// 3. FRONTEND UI
+// 3. FRONTEND UI & SCRIPTS
 // =======================
 const mainScript = `
 <script>
     const IS_USER_VIP = window.IS_VIP_USER || false;
+    let targetFileId = null; // For Edit/Delete
 
     function switchTab(tab) {
         const url = new URL(window.location);
@@ -110,6 +87,56 @@ const mainScript = `
         document.getElementById('btn-mode-' + mode).classList.add('bg-yellow-500', 'text-black');
     }
 
+    // --- MODAL FUNCTIONS (CUSTOM BOXES) ---
+    function openDeleteModal(fileId) {
+        targetFileId = fileId;
+        document.getElementById('deleteModal').classList.remove('hidden');
+    }
+    
+    function openEditModal(fileId) {
+        if (!IS_USER_VIP) return;
+        targetFileId = fileId;
+        document.getElementById('editModal').classList.remove('hidden');
+    }
+
+    function closeModal(id) {
+        document.getElementById(id).classList.add('hidden');
+        targetFileId = null;
+    }
+
+    async function confirmDelete() {
+        if(!targetFileId) return;
+        const btn = document.getElementById('btnConfirmDelete');
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ဖျက်နေသည်...';
+        btn.disabled = true;
+
+        try {
+            const res = await fetch('/delete/' + targetFileId, { method: 'POST' });
+            if(res.ok) window.location.reload();
+            else alert("ဖျက်မရပါ");
+        } catch(e) { alert("Error"); }
+    }
+
+    async function confirmEdit() {
+        if(!targetFileId) return;
+        const days = document.getElementById('editExpirySelect').value;
+        const btn = document.getElementById('btnConfirmEdit');
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ပြင်နေသည်...';
+        btn.disabled = true;
+
+        try {
+            const res = await fetch('/api/file/edit', { 
+                method: 'POST', 
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ fileId: targetFileId, days: days }) 
+            });
+            const d = await res.json();
+            if(d.success) window.location.reload();
+            else alert(d.error);
+        } catch(e) { alert("Error"); }
+    }
+
+    // SEARCH
     function filterFiles() {
         const input = document.getElementById('searchInput');
         const filter = input.value.toLowerCase();
@@ -120,15 +147,7 @@ const mainScript = `
         }
     }
 
-    function openEditModal(fileId) {
-        if (!IS_USER_VIP) { alert("VIP သီးသန့်ဖြစ်သည်"); return; }
-        const days = prompt("သက်တမ်းရက်သတ်မှတ်ရန် (0 = သက်တမ်းမဲ့):", "0");
-        if (days !== null) {
-            fetch('/api/file/edit', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ fileId: fileId, days: days }) })
-            .then(r => r.json()).then(d => { if(d.success) window.location.reload(); else alert(d.error); });
-        }
-    }
-
+    // UPLOAD LOGIC
     document.addEventListener("DOMContentLoaded", () => {
         const fileInput = document.getElementById('fileInput');
         if(fileInput) {
@@ -248,12 +267,64 @@ const Layout = (props: { children: any; title?: string; user?: User | null }) =>
             <script src="https://cdn.tailwindcss.com"></script>
             <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet" />
             <link href="https://fonts.googleapis.com/css2?family=Padauk:wght@400;700&display=swap" rel="stylesheet" />
-            <style>{`body { font-family: 'Padauk', sans-serif; background-color: #000000; color: #e4e4e7; } .glass { background: #111111; border: 1px solid #333; } .vip-card { background: linear-gradient(145deg, #222, #111); border: 1px solid #333; transition: 0.3s; } .vip-card:hover { border-color: #eab308; transform: translateY(-5px); } .custom-scroll::-webkit-scrollbar { width: 5px; } .custom-scroll::-webkit-scrollbar-track { background: #000; } .custom-scroll::-webkit-scrollbar-thumb { background: #333; border-radius: 5px; }`}</style>
+            <style>{`
+                body { font-family: 'Padauk', sans-serif; background-color: #000000; color: #e4e4e7; }
+                .glass { background: #111111; border: 1px solid #333; }
+                .vip-card { background: linear-gradient(145deg, #222, #111); border: 1px solid #333; transition: 0.3s; }
+                .vip-card:hover { border-color: #eab308; transform: translateY(-5px); }
+                .custom-scroll::-webkit-scrollbar { width: 5px; }
+                .custom-scroll::-webkit-scrollbar-track { background: #000; }
+                .custom-scroll::-webkit-scrollbar-thumb { background: #333; border-radius: 5px; }
+                /* Custom Modal */
+                .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); backdrop-filter: blur(4px); z-index: 100; display: flex; align-items: center; justify-content: center; }
+                .modal-box { background: #18181b; border: 1px solid #eab308; border-radius: 16px; padding: 24px; width: 90%; max-width: 400px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04); animation: modalPop 0.2s ease-out; }
+                @keyframes modalPop { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+            `}</style>
             <script dangerouslySetInnerHTML={{__html: `window.IS_VIP_USER = ${isVip};`}} />
         </head>
         <body data-vip={isVip ? "true" : "false"}>
             <nav class="fixed top-0 w-full z-50 glass border-b border-zinc-800 bg-black/80 backdrop-blur-md"><div class="max-w-5xl mx-auto px-4 py-3 flex justify-between items-center"><a href="/" class="text-xl font-black text-white italic tracking-tighter flex items-center gap-2"><i class="fa-solid fa-cube text-yellow-500"></i> <span class="bg-clip-text text-transparent bg-gradient-to-r from-yellow-400 to-yellow-600">GOLD STORAGE</span></a>{props.user ? (<div class="flex gap-3 items-center"><div class="hidden sm:flex flex-col items-end leading-tight"><span class="text-xs font-bold text-gray-300">{props.user.username}</span>{isVipActive(props.user) ? <span class="text-[9px] text-yellow-500 font-bold bg-yellow-500/10 px-1 rounded">VIP</span> : <span class="text-[9px] text-gray-500 font-bold bg-zinc-800 px-1 rounded">FREE</span>}</div>{props.user.username === ADMIN_USERNAME && <a href="/admin" class="w-8 h-8 flex items-center justify-center bg-purple-600 rounded-full hover:bg-purple-500 text-white"><i class="fa-solid fa-shield-halved text-xs"></i></a>}<a href="/logout" class="w-8 h-8 flex items-center justify-center bg-zinc-800 border border-zinc-700 rounded-full hover:bg-red-600/20 hover:text-red-500"><i class="fa-solid fa-power-off text-xs"></i></a></div>) : (<a href="/login" class="text-xs bg-yellow-500 text-black px-4 py-2 rounded-full font-bold hover:bg-yellow-400 transition">ဝင်မည်</a>)}</div></nav>
             <main class="pt-20 pb-10 px-4 max-w-5xl mx-auto">{props.children}</main>
+            
+            {/* --- CUSTOM MODALS --- */}
+            
+            {/* Delete Modal */}
+            <div id="deleteModal" class="modal-overlay hidden">
+                <div class="modal-box text-center">
+                    <div class="w-12 h-12 bg-red-900/30 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4"><i class="fa-solid fa-trash text-xl"></i></div>
+                    <h3 class="text-lg font-bold text-white mb-2">ဖိုင်ကို ဖျက်မည်လား?</h3>
+                    <p class="text-sm text-gray-400 mb-6">ဤဖိုင်ကို အပြီးတိုင် ဖျက်သိမ်းပါမည်။ ပြန်ယူ၍ မရနိုင်ပါ။</p>
+                    <div class="flex gap-3">
+                        <button onclick="closeModal('deleteModal')" class="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white py-2.5 rounded-xl font-bold transition">မဖျက်တော့ပါ</button>
+                        <button id="btnConfirmDelete" onclick="confirmDelete()" class="flex-1 bg-red-600 hover:bg-red-500 text-white py-2.5 rounded-xl font-bold transition">ဖျက်မည်</button>
+                    </div>
+                </div>
+            </div>
+
+            {/* Edit Expiry Modal */}
+            <div id="editModal" class="modal-overlay hidden">
+                <div class="modal-box">
+                    <h3 class="text-lg font-bold text-white mb-4 flex items-center gap-2"><i class="fa-solid fa-clock text-yellow-500"></i> သက်တမ်း ပြင်ဆင်ရန်</h3>
+                    <div class="mb-6">
+                        <label class="block text-xs font-bold text-gray-400 mb-2 uppercase">သက်တမ်းရွေးချယ်ပါ</label>
+                        <div class="relative">
+                            <select id="editExpirySelect" class="w-full bg-black border border-zinc-700 text-white p-3 rounded-xl appearance-none outline-none focus:border-yellow-500 cursor-pointer">
+                                <option value="0">သက်တမ်းမဲ့ (Lifetime)</option>
+                                <option value="1">၁ ရက်</option>
+                                <option value="7">၁ ပတ်</option>
+                                <option value="30">၁ လ</option>
+                                <option value="365">၁ နှစ်</option>
+                            </select>
+                            <i class="fa-solid fa-chevron-down absolute right-4 top-4 text-gray-500 pointer-events-none"></i>
+                        </div>
+                    </div>
+                    <div class="flex gap-3">
+                        <button onclick="closeModal('editModal')" class="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white py-2.5 rounded-xl font-bold transition">မပြင်ပါ</button>
+                        <button id="btnConfirmEdit" onclick="confirmEdit()" class="flex-1 bg-yellow-500 hover:bg-yellow-400 text-black py-2.5 rounded-xl font-bold transition">အတည်ပြုမည်</button>
+                    </div>
+                </div>
+            </div>
+
             <div dangerouslySetInnerHTML={{__html: mainScript}} />
         </body>
     </html>
@@ -277,7 +348,6 @@ app.get("/", async (c) => {
     for await (const res of iter) { if (filterType === 'all' || res.value.type === filterType) { files.push(res.value); } nextCursor = res.cursor; }
 
     const totalGB = (user.usedStorage / 1024 / 1024 / 1024).toFixed(2);
-    // 🔥 SAFE GUARD FOR UNKNOWN PLAN
     const currentPlan = PLANS[user.plan] || PLANS.free;
     const planLimit = currentPlan.limit;
     const displayLimit = (planLimit / 1024 / 1024 / 1024).toFixed(0) + " GB";
@@ -346,9 +416,19 @@ app.get("/", async (c) => {
                         <div>
                             <label class="text-xs font-bold text-zinc-500 uppercase mb-2 block">သက်တမ်း</label>
                             {isVip ? (
-                                <select name="expiry" class="w-full bg-black border border-yellow-600/50 rounded-xl p-3 text-sm text-yellow-500 font-bold outline-none"><option value="0">သက်တမ်းမဲ့ (Lifetime)</option><option value="7">၁ ပတ်</option><option value="30">၁ လ</option></select>
+                                <div class="relative">
+                                    <select name="expiry" class="w-full bg-black border border-yellow-600/50 rounded-xl p-3 text-sm text-yellow-500 font-bold outline-none appearance-none cursor-pointer">
+                                        <option value="0">သက်တမ်းမဲ့ (Lifetime)</option>
+                                        <option value="7">၁ ပတ်</option>
+                                        <option value="30">၁ လ</option>
+                                    </select>
+                                    <i class="fa-solid fa-chevron-down absolute right-4 top-4 text-yellow-500 pointer-events-none"></i>
+                                </div>
                             ) : (
-                                <div class="relative"><input disabled value="၃၀ ရက် (Free Limit)" class="w-full bg-zinc-900 border border-zinc-700 text-gray-500 rounded-xl p-3 text-sm font-bold cursor-not-allowed" /><input type="hidden" name="expiry" value="30" /></div>
+                                <div class="relative">
+                                    <input disabled value="၃၀ ရက် (Free Limit)" class="w-full bg-zinc-900 border border-zinc-700 text-gray-500 rounded-xl p-3 text-sm font-bold cursor-not-allowed" />
+                                    <input type="hidden" name="expiry" value="30" />
+                                </div>
                             )}
                         </div>
                     </div>
@@ -370,7 +450,17 @@ app.get("/", async (c) => {
                     <div><label class="text-xs font-bold text-zinc-500 uppercase mb-2 block">Direct Video/File URL</label><input id="remoteUrl" type="url" placeholder="https://example.com/video.mp4" class="w-full bg-black border border-zinc-700 rounded-xl p-3 text-sm focus:border-yellow-500 outline-none text-white" /></div>
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
                         <div><label class="text-xs font-bold text-zinc-500 uppercase mb-2 block">ဖိုင်နာမည်</label><input id="remoteName" placeholder="video.mp4" class="w-full bg-black border border-zinc-700 rounded-xl p-3 text-sm focus:border-yellow-500 outline-none text-white" /></div>
-                        <div><label class="text-xs font-bold text-zinc-500 uppercase mb-2 block">သက်တမ်း</label><select name="expiry_remote" class="w-full bg-black border border-yellow-600/50 rounded-xl p-3 text-sm text-yellow-500 font-bold outline-none"><option value="0">သက်တမ်းမဲ့ (Lifetime)</option><option value="7">၁ ပတ်</option><option value="30">၁ လ</option></select></div>
+                        <div>
+                            <label class="text-xs font-bold text-zinc-500 uppercase mb-2 block">သက်တမ်း</label>
+                            <div class="relative">
+                                <select name="expiry_remote" class="w-full bg-black border border-yellow-600/50 rounded-xl p-3 text-sm text-yellow-500 font-bold outline-none appearance-none">
+                                    <option value="0">သက်တမ်းမဲ့ (Lifetime)</option>
+                                    <option value="7">၁ ပတ်</option>
+                                    <option value="30">၁ လ</option>
+                                </select>
+                                <i class="fa-solid fa-chevron-down absolute right-4 top-4 text-yellow-500 pointer-events-none"></i>
+                            </div>
+                        </div>
                     </div>
                     <div class="grid grid-cols-2 gap-4">
                         <label class="cursor-pointer relative"><input type="radio" name="server_remote" value="1" class="peer sr-only" checked /><div class="p-3 bg-black border border-zinc-700 rounded-xl peer-checked:border-blue-500 peer-checked:bg-blue-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-400 peer-checked:text-white">Server 1</span></div></label>
@@ -420,7 +510,7 @@ app.get("/", async (c) => {
                                 <button onclick={`navigator.clipboard.writeText(window.location.origin + '${viewLink}'); this.innerHTML='<i class="fa-solid fa-check text-green-500"></i>'; setTimeout(()=>this.innerHTML='<i class="fa-regular fa-copy"></i>', 1000)`} class="w-8 h-8 flex items-center justify-center bg-zinc-800 hover:bg-white hover:text-black text-gray-300 rounded-lg transition" title="Copy"><i class="fa-regular fa-copy text-xs"></i></button>
                                 {(f.type === 'video' || f.type === 'image') && (<a href={viewLink} target="_blank" title="View" class="w-8 h-8 flex items-center justify-center bg-zinc-800 hover:bg-blue-500 text-white rounded-lg transition"><i class={`fa-solid ${f.type === 'video' ? 'fa-play' : 'fa-eye'} text-xs`}></i></a>)}
                                 <a href={downloadLink} target="_blank" title="Download" class="w-8 h-8 flex items-center justify-center bg-zinc-800 hover:bg-green-600 text-white rounded-lg transition"><i class="fa-solid fa-download text-xs"></i></a>
-                                <form action={`/delete/${f.id}`} method="post" onsubmit="return confirm('ဖျက်မှာသေချာလား?')"><button class="w-8 h-8 flex items-center justify-center bg-zinc-800 hover:bg-red-600 text-white rounded-lg transition"><i class="fa-solid fa-trash text-xs"></i></button></form>
+                                <button onclick={`openDeleteModal('${f.id}')`} class="w-8 h-8 flex items-center justify-center bg-zinc-800 hover:bg-red-600 text-white rounded-lg transition" title="Delete"><i class="fa-solid fa-trash text-xs"></i></button>
                             </div>
                         </div>
                     </div>
@@ -564,7 +654,6 @@ app.get("/admin", async (c) => {
                 <table class="w-full text-left text-sm text-gray-400 min-w-[700px]"> 
                     <thead class="bg-zinc-900 text-[10px] uppercase font-bold text-gray-300 tracking-wider"><tr><th class="px-4 py-3">User</th><th class="px-4 py-3">Plan</th><th class="px-4 py-3">Expiry</th><th class="px-4 py-3 text-center">Update Plan</th><th class="px-4 py-3 text-center">Actions</th></tr></thead>
                     <tbody class="divide-y divide-zinc-700/50">{users.map(u => {
-                        // FIX FOR ADMIN VIEW: Handle old data gracefully
                         const planName = PLANS[u.plan]?.name || "Legacy";
                         return (
                         <tr class="hover:bg-zinc-800/40 transition">
@@ -630,7 +719,6 @@ app.post("/register", async (c) => { const { username, password } = await c.req.
 app.get("/logout", (c) => { deleteCookie(c, "auth"); return c.redirect("/login"); });
 app.get("/change-password", (c) => c.html(<Layout title="Change Password"><div class="max-w-sm mx-auto mt-20 glass p-8 rounded-xl"><h1 class="text-xl font-bold mb-4 text-white">စကားဝှက်ပြောင်းမည်</h1><form action="/change-password" method="post" class="space-y-4"><input type="password" name="newpass" placeholder="New Password" required class="w-full bg-black border border-zinc-700 p-3 rounded-xl text-white" /><button class="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded-xl font-bold text-white">အတည်ပြုမည်</button></form><a href="/" class="block text-center mt-4 text-xs text-gray-400">Back</a></div></Layout>));
 app.post("/change-password", async (c) => { const cookie = getCookie(c, "auth"); const user = await getUser(cookie || ""); if(!user) return c.redirect("/login"); const { newpass } = await c.req.parseBody(); if(String(newpass).length < 6) return c.text("Min 6 chars"); user.passwordHash = await hashPassword(String(newpass)); await kv.set(["users", user.username], user); return c.html(<Layout><div class="text-center mt-20"><p class="text-green-500 text-xl font-bold mb-4">Success!</p><a href="/" class="bg-zinc-800 px-4 py-2 rounded-lg text-sm text-white">Home</a></div></Layout>); });
-// Cleanup Cron: 7 Days Grace Period Logic
 Deno.cron("Cleanup", "0 * * * *", async () => { 
     const now = Date.now(); 
     const iter = kv.list<FileData>({ prefix: ["files"] }); 
@@ -640,24 +728,14 @@ Deno.cron("Cleanup", "0 * * * *", async () => {
         const uRes = await kv.get<User>(["users", username]);
         if (uRes.value) {
             const user = uRes.value;
-            // 1. If file has explicit expiry (e.g. Free user 30 days) -> Delete
-            if (file.expiresAt > 0 && file.expiresAt < now) {
-                await deleteFileAndRecord(file, user, entry.key);
-                continue;
-            }
-            // 2. VIP Grace Period Logic: If VIP expired > 7 days ago -> Delete ALL VIP files
+            if (file.expiresAt > 0 && file.expiresAt < now) { await deleteFileAndRecord(file, user, entry.key); continue; }
             if (user.vipExpiry && user.vipExpiry < now) {
-                const gracePeriodEnd = user.vipExpiry + (7 * 24 * 60 * 60 * 1000); // 7 Days
-                if (now > gracePeriodEnd) {
-                    await deleteFileAndRecord(file, user, entry.key);
-                }
+                const gracePeriodEnd = user.vipExpiry + (7 * 24 * 60 * 60 * 1000);
+                if (now > gracePeriodEnd) await deleteFileAndRecord(file, user, entry.key);
             }
         } else { await kv.delete(entry.key); } 
     } 
 });
-async function deleteFileAndRecord(file: FileData, user: User, key: any) {
-    await deleteFileFromR2(file);
-    await kv.atomic().delete(key).set(["users", user.username], { ...user, usedStorage: Math.max(0, user.usedStorage - file.sizeBytes) }).commit();
-}
+async function deleteFileAndRecord(file: FileData, user: User, key: any) { await deleteFileFromR2(file); await kv.atomic().delete(key).set(["users", user.username], { ...user, usedStorage: Math.max(0, user.usedStorage - file.sizeBytes) }).commit(); }
 
 Deno.serve(app.fetch);
