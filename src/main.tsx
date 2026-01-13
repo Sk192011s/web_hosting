@@ -11,24 +11,17 @@ const kv = await Deno.openKv();
 // =======================
 // 1. CONFIG
 // =======================
-const ADMIN_USERNAME = "soekyawwin"; // <--- Change this
-const SECRET_KEY = Deno.env.get("SECRET_SALT") || "change-this-secret-key-securely";
+const ADMIN_USERNAME = "soekyawwin"; 
+const SECRET_KEY = Deno.env.get("SECRET_SALT") || "change-this-secret";
 
 // Storage Quota
 const FREE_STORAGE_LIMIT = 50 * 1024 * 1024 * 1024; // 50 GB
 const VIP_STORAGE_LIMIT = 100 * 1024 * 1024 * 1024; // 100 GB
 const MAX_REMOTE_SIZE = 1.5 * 1024 * 1024 * 1024;   // 1.5 GB
+const VIP_GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1000; // 7 Days Grace Period
 
-const s3Server1 = new S3Client({
-  region: "auto",
-  endpoint: `https://${Deno.env.get("R2_1_ACCOUNT_ID")}.r2.cloudflarestorage.com`,
-  credentials: { accessKeyId: Deno.env.get("R2_1_ACCESS_KEY_ID")!, secretAccessKey: Deno.env.get("R2_1_SECRET_ACCESS_KEY")! },
-});
-const s3Server2 = new S3Client({
-  region: "auto",
-  endpoint: `https://${Deno.env.get("R2_2_ACCOUNT_ID")}.r2.cloudflarestorage.com`,
-  credentials: { accessKeyId: Deno.env.get("R2_2_ACCESS_KEY_ID")!, secretAccessKey: Deno.env.get("R2_2_SECRET_ACCESS_KEY")! },
-});
+const s3Server1 = new S3Client({ region: "auto", endpoint: `https://${Deno.env.get("R2_1_ACCOUNT_ID")}.r2.cloudflarestorage.com`, credentials: { accessKeyId: Deno.env.get("R2_1_ACCESS_KEY_ID")!, secretAccessKey: Deno.env.get("R2_1_SECRET_ACCESS_KEY")! } });
+const s3Server2 = new S3Client({ region: "auto", endpoint: `https://${Deno.env.get("R2_2_ACCOUNT_ID")}.r2.cloudflarestorage.com`, credentials: { accessKeyId: Deno.env.get("R2_2_ACCESS_KEY_ID")!, secretAccessKey: Deno.env.get("R2_2_SECRET_ACCESS_KEY")! } });
 
 // =======================
 // 2. HELPERS
@@ -40,8 +33,7 @@ async function hashPassword(password: string) {
     const enc = new TextEncoder();
     const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(password), { name: "PBKDF2" }, false, ["deriveBits", "deriveKey"]);
     const key = await crypto.subtle.deriveKey({ name: "PBKDF2", salt: enc.encode(SECRET_KEY), iterations: 100000, hash: "SHA-256" }, keyMaterial, { name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
-    const exported = await crypto.subtle.exportKey("raw", key);
-    return Array.from(new Uint8Array(exported)).map(b => b.toString(16).padStart(2, '0')).join('');
+    return Array.from(new Uint8Array(await crypto.subtle.exportKey("raw", key))).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 async function getUser(username: string) { const res = await kv.get<User>(["users", username]); return res.value; }
 function checkVipStatus(user: User): boolean { return user.vipExpiry ? user.vipExpiry > Date.now() : user.isVip; }
@@ -49,13 +41,53 @@ function formatDate(ts: number) { return new Date(ts).toLocaleDateString('en-GB'
 function mimeToExt(mime: string): string { const m: any = {'video/mp4':'mp4','video/webm':'webm','video/x-matroska':'mkv','image/jpeg':'jpg','image/png':'png'}; return m[mime.split(';')[0]] || 'bin'; }
 
 // =======================
-// 3. FRONTEND UI
+// 3. FRONTEND UI & CUSTOM MODALS
 // =======================
 const mainScript = `
 <script>
-    // Global VIP Status passed from server
     const IS_USER_VIP = window.IS_VIP_USER || false;
 
+    // --- CUSTOM NOTIFICATIONS ---
+    function showToast(msg, type = 'success') {
+        const container = document.getElementById('toast-container');
+        const toast = document.createElement('div');
+        const color = type === 'error' ? 'border-red-500 text-red-400' : 'border-green-500 text-green-400';
+        toast.className = \`bg-zinc-900 border \${color} border-l-4 p-4 rounded shadow-lg flex items-center gap-3 transform transition-all duration-300 translate-x-full opacity-0\`;
+        toast.innerHTML = \`<i class="fa-solid \${type === 'error' ? 'fa-circle-exclamation' : 'fa-circle-check'}"></i> <span>\${msg}</span>\`;
+        container.appendChild(toast);
+        
+        // Animate In
+        requestAnimationFrame(() => toast.classList.remove('translate-x-full', 'opacity-0'));
+        // Animate Out
+        setTimeout(() => {
+            toast.classList.add('translate-x-full', 'opacity-0');
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+
+    function showConfirm(title, msg, onYes) {
+        document.getElementById('modalTitle').innerText = title;
+        document.getElementById('modalMsg').innerText = msg;
+        document.getElementById('modalInputContainer').classList.add('hidden');
+        document.getElementById('modalYes').onclick = () => { closeModal(); onYes(); };
+        document.getElementById('customModal').classList.remove('hidden');
+    }
+
+    function showPrompt(title, msg, defaultValue, onYes) {
+        document.getElementById('modalTitle').innerText = title;
+        document.getElementById('modalMsg').innerText = msg;
+        const inputDiv = document.getElementById('modalInputContainer');
+        inputDiv.classList.remove('hidden');
+        const input = document.getElementById('modalInput');
+        input.value = defaultValue;
+        document.getElementById('modalYes').onclick = () => { closeModal(); onYes(input.value); };
+        document.getElementById('customModal').classList.remove('hidden');
+        input.focus();
+    }
+
+    function closeModal() { document.getElementById('customModal').classList.add('hidden'); }
+
+    // --- FUNCTIONS ---
     function switchTab(tab) {
         const url = new URL(window.location);
         url.searchParams.set('type', tab);
@@ -64,62 +96,61 @@ const mainScript = `
     }
     
     function switchUploadMode(mode) {
-        // VIP Check for Remote Mode
         if (mode === 'remote' && !IS_USER_VIP) {
-            alert("🔒 VIP Feature Only! \\n\\nRemote Upload (URL Upload) ကိုအသုံးပြုရန် VIP အဆင့်မြှင့်တင်ပါ။");
+            showToast("VIP Only Feature! Please upgrade.", "error");
             return;
         }
-
         document.getElementById('mode-local').classList.add('hidden');
         document.getElementById('mode-remote').classList.add('hidden');
         document.getElementById('btn-mode-local').classList.remove('bg-yellow-500', 'text-black');
         document.getElementById('btn-mode-remote').classList.remove('bg-yellow-500', 'text-black');
-        
         document.getElementById('mode-' + mode).classList.remove('hidden');
         document.getElementById('btn-mode-' + mode).classList.add('bg-yellow-500', 'text-black');
     }
 
-    // --- SEARCH FUNCTION ---
     function filterFiles() {
         const input = document.getElementById('searchInput');
         const filter = input.value.toLowerCase();
         const nodes = document.getElementsByClassName('file-item');
-
         for (let i = 0; i < nodes.length; i++) {
             let name = nodes[i].getAttribute('data-name').toLowerCase();
-            if (name.includes(filter)) {
-                nodes[i].style.display = ""; // Show
-            } else {
-                nodes[i].style.display = "none"; // Hide
-            }
+            nodes[i].style.display = name.includes(filter) ? "" : "none";
         }
     }
 
-    // --- EDIT EXPIRY (VIP) ---
-    function openEditModal(fileId, currentName, currentExpiry) {
-        if (!IS_USER_VIP) { alert("VIP Only"); return; }
-        const days = prompt("သက်တမ်းရက်သတ်မှတ်ရန် (0 = Lifetime):", "30");
-        if (days !== null) {
+    function confirmDelete(fileId) {
+        showConfirm("Delete File?", "ဖိုင်ကို အပြီးတိုင် ဖျက်မှာ သေချာလား?", () => {
+            // Submit form programmatically
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = '/delete/' + fileId;
+            document.body.appendChild(form);
+            form.submit();
+        });
+    }
+
+    function openEditModal(fileId, currentName) {
+        if (!IS_USER_VIP) return;
+        showPrompt("Edit Expiry", "ရက်အရေအတွက် သတ်မှတ်ပါ (0 = Lifetime)", "30", (days) => {
             fetch('/api/file/edit', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ fileId: fileId, days: days })
             }).then(r => r.json()).then(d => {
-                if(d.success) window.location.reload();
-                else alert(d.error);
+                if(d.success) { showToast("Updated Successfully"); setTimeout(() => window.location.reload(), 800); }
+                else showToast(d.error, "error");
             });
-        }
+        });
     }
 
     // --- LOCAL UPLOAD ---
     document.addEventListener("DOMContentLoaded", () => {
         const fileInput = document.getElementById('fileInput');
-        const fileNameDisplay = document.getElementById('fileNameDisplay');
         if(fileInput) {
             fileInput.addEventListener('change', function() {
                 if (this.files && this.files.length > 0) {
-                    fileNameDisplay.innerText = this.files[0].name;
-                    fileNameDisplay.classList.add('text-yellow-500', 'font-bold');
+                    document.getElementById('fileNameDisplay').innerText = this.files[0].name;
+                    document.getElementById('fileNameDisplay').classList.add('text-yellow-500', 'font-bold');
                 }
             });
         }
@@ -129,17 +160,14 @@ const mainScript = `
         event.preventDefault();
         const fileInput = document.getElementById('fileInput');
         const submitBtn = document.getElementById('submitBtn');
-        const progressBar = document.getElementById('progressBar');
-        const progressContainer = document.getElementById('progressContainer');
-        const progressText = document.getElementById('progressText');
         const form = document.getElementById('uploadForm');
 
-        if(fileInput.files.length === 0) { alert("ဖိုင်ရွေးပါ"); return; }
+        if(fileInput.files.length === 0) { showToast("ဖိုင်ရွေးပေးပါ", "error"); return; }
         const file = fileInput.files[0];
 
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Checking...';
-        progressContainer.classList.remove('hidden');
+        document.getElementById('progressContainer').classList.remove('hidden');
 
         try {
             const formData = new FormData(form);
@@ -158,46 +186,45 @@ const mainScript = `
             xhr.upload.onprogress = (e) => {
                 if (e.lengthComputable) {
                     const percent = Math.round((e.loaded / e.total) * 100);
-                    progressBar.style.width = percent + "%";
-                    progressText.innerText = percent + "%";
+                    document.getElementById('progressBar').style.width = percent + "%";
+                    document.getElementById('progressText').innerText = percent + "%";
                 }
             };
             xhr.onload = async () => {
                 if (xhr.status === 200) {
                     submitBtn.innerHTML = 'Saving...';
                     await fetch("/api/upload/complete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, fileId, server: formData.get("server"), expiry: formData.get("expiry") }) });
-                    progressBar.classList.add('bg-green-500');
-                    submitBtn.innerHTML = 'Success!';
+                    document.getElementById('progressBar').classList.add('bg-green-500');
+                    showToast("Upload Successful!");
                     setTimeout(() => window.location.reload(), 1000);
                 } else { throw new Error("Upload Failed"); }
             };
             xhr.send(file);
-        } catch (error) { alert(error.message); submitBtn.disabled = false; submitBtn.innerText = "Try Again"; progressContainer.classList.add('hidden'); }
+        } catch (error) { showToast(error.message, "error"); submitBtn.disabled = false; submitBtn.innerText = "Try Again"; }
     }
 
     // --- REMOTE UPLOAD ---
     async function uploadRemote(event) {
         event.preventDefault();
         const urlInput = document.getElementById('remoteUrl');
-        const nameInput = document.getElementById('remoteName');
-        const serverInput = document.querySelector('input[name="server_remote"]:checked');
-        const expiryInput = document.querySelector('select[name="expiry_remote"]');
         const submitBtn = document.getElementById('remoteBtn');
-        const progressBar = document.getElementById('progressBarRemote');
-        const progressContainer = document.getElementById('progressContainerRemote');
-        const progressText = document.getElementById('progressTextRemote');
 
-        if(!urlInput.value) { alert("URL ထည့်ပါ"); return; }
+        if(!urlInput.value) { showToast("URL ထည့်ပါ", "error"); return; }
         
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<i class="fa-solid fa-satellite-dish fa-spin"></i> Starting...';
-        progressContainer.classList.remove('hidden');
-        progressBar.style.width = "0%";
+        document.getElementById('progressContainerRemote').classList.remove('hidden');
+        document.getElementById('progressBarRemote').style.width = "0%";
 
         try {
             const response = await fetch('/api/upload/remote', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url: urlInput.value, customName: nameInput.value, server: serverInput.value, expiry: expiryInput.value })
+                body: JSON.stringify({
+                    url: urlInput.value,
+                    customName: document.getElementById('remoteName').value,
+                    server: document.querySelector('input[name="server_remote"]:checked').value,
+                    expiry: document.querySelector('select[name="expiry_remote"]').value
+                })
             });
 
             const reader = response.body.getReader();
@@ -217,29 +244,23 @@ const mainScript = `
                         const msg = JSON.parse(line);
                         if (msg.error) throw new Error(msg.error);
                         if (msg.progress) {
-                            // Update Status based on progress
                             if (msg.progress < 99) {
                                 submitBtn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> Downloading...';
                             } else {
                                 submitBtn.innerHTML = '<i class="fa-solid fa-floppy-disk fa-spin"></i> Saving to Cloud...';
                             }
-                            progressBar.style.width = msg.progress + "%";
-                            progressText.innerText = msg.progress + "%";
+                            document.getElementById('progressBarRemote').style.width = msg.progress + "%";
+                            document.getElementById('progressTextRemote').innerText = msg.progress + "%";
                         }
                         if (msg.done) {
-                            progressBar.classList.add('bg-green-500');
-                            submitBtn.innerHTML = 'Success!';
+                            document.getElementById('progressBarRemote').classList.add('bg-green-500');
+                            showToast("Remote Upload Success!");
                             setTimeout(() => window.location.reload(), 1000);
                         }
                     } catch (e) { throw e; }
                 }
             }
-        } catch (e) {
-            alert("Error: " + e.message);
-            submitBtn.disabled = false;
-            submitBtn.innerText = "Try Again";
-            progressContainer.classList.add('hidden');
-        }
+        } catch (e) { showToast(e.message, "error"); submitBtn.disabled = false; submitBtn.innerText = "Try Again"; }
     }
 </script>
 `;
@@ -258,6 +279,24 @@ const Layout = (props: { children: any; title?: string; user?: User | null }) =>
             <script dangerouslySetInnerHTML={{__html: `window.IS_VIP_USER = ${isVip};`}} />
         </head>
         <body data-vip={isVip ? "true" : "false"}>
+            {/* Toast Container */}
+            <div id="toast-container" class="fixed top-20 right-5 z-[100] space-y-3 pointer-events-none transition-all"></div>
+            
+            {/* Custom Modal */}
+            <div id="customModal" class="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm hidden transition-opacity">
+                <div class="glass bg-[#18181b] p-6 rounded-2xl shadow-2xl w-80 transform transition-all scale-100">
+                    <h3 id="modalTitle" class="text-lg font-bold text-white mb-2">Title</h3>
+                    <p id="modalMsg" class="text-zinc-400 text-sm mb-4">Message</p>
+                    <div id="modalInputContainer" class="hidden mb-4">
+                        <input id="modalInput" class="w-full bg-zinc-900 border border-zinc-700 p-2 rounded text-white outline-none focus:border-yellow-500" />
+                    </div>
+                    <div class="flex gap-3 justify-end">
+                        <button onclick="closeModal()" class="px-4 py-2 text-xs font-bold text-zinc-400 hover:text-white transition">Cancel</button>
+                        <button id="modalYes" class="px-4 py-2 text-xs font-bold bg-yellow-500 text-black rounded hover:bg-yellow-400 transition shadow-lg shadow-yellow-500/20">Confirm</button>
+                    </div>
+                </div>
+            </div>
+
             <nav class="fixed top-0 w-full z-50 glass border-b border-zinc-800"><div class="max-w-5xl mx-auto px-4 py-3 flex justify-between items-center"><a href="/" class="text-xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-yellow-600 italic tracking-tighter"><i class="fa-solid fa-cube text-yellow-500 mr-2"></i>GOLD STORAGE</a>{props.user ? (<div class="flex gap-3 items-center"><div class="hidden sm:flex flex-col items-end leading-tight"><span class="text-xs font-bold text-gray-300">{props.user.username}</span>{checkVipStatus(props.user) ? <span class="text-[9px] text-yellow-500 font-bold">VIP</span> : <span class="text-[9px] text-gray-500 font-bold">FREE</span>}</div>{props.user.username === ADMIN_USERNAME && <a href="/admin" class="w-8 h-8 flex items-center justify-center bg-purple-600 rounded-full hover:bg-purple-500 text-white"><i class="fa-solid fa-shield-halved text-xs"></i></a>}<a href="/logout" class="w-8 h-8 flex items-center justify-center bg-zinc-800 border border-zinc-700 rounded-full hover:bg-red-600/20 hover:text-red-500"><i class="fa-solid fa-power-off text-xs"></i></a></div>) : (<a href="/login" class="text-xs bg-yellow-500 text-black px-4 py-2 rounded-full font-bold hover:bg-yellow-400 transition">ဝင်မည်</a>)}</div></nav>
             <main class="pt-20 pb-10 px-4 max-w-5xl mx-auto">{props.children}</main>
             <div dangerouslySetInnerHTML={{__html: mainScript}} />
@@ -299,7 +338,6 @@ app.get("/", async (c) => {
         <div class="glass p-6 rounded-2xl mb-8 border border-zinc-700/50 shadow-2xl">
             <div class="flex gap-4 mb-6 border-b border-zinc-700 pb-2">
                 <button id="btn-mode-local" onclick="switchUploadMode('local')" class="px-4 py-2 text-xs font-bold rounded-lg bg-yellow-500 text-black transition">Direct Upload</button>
-                {/* Free users also see this button now */}
                 <button id="btn-mode-remote" onclick="switchUploadMode('remote')" class="px-4 py-2 text-xs font-bold rounded-lg bg-zinc-800 text-gray-400 hover:text-white transition"><i class="fa-solid fa-globe mr-1"></i> Remote URL {isVip ? "" : "(VIP)"}</button>
             </div>
 
@@ -324,7 +362,7 @@ app.get("/", async (c) => {
                 <button id="submitBtn" class="w-full bg-gradient-to-r from-yellow-600 to-yellow-500 text-black font-bold py-3.5 rounded-xl shadow-lg hover:brightness-110 transition active:scale-95">တင်မည်</button>
             </form>
 
-            {/* REMOTE UPLOAD FORM (VIP Logic Handled in JS) */}
+            {/* REMOTE UPLOAD FORM */}
             <form id="mode-remote" onsubmit="uploadRemote(event)" class="space-y-5 hidden">
                 <div><label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">Direct Video/File URL</label><input id="remoteUrl" type="url" placeholder="https://example.com/video.mp4" class="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-3 text-sm focus:border-yellow-500 outline-none transition" /></div>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -340,11 +378,11 @@ app.get("/", async (c) => {
             </form>
         </div>
 
-        {/* File List & Search */}
+        {/* File List */}
         <div class="flex flex-col md:flex-row md:items-center justify-between mb-4 gap-4">
             <h3 class="font-bold text-white text-sm uppercase tracking-wide"><i class="fa-solid fa-list-ul mr-2 text-zinc-500"></i> My Files</h3>
             <div class="flex gap-2 w-full md:w-auto">
-                <input id="searchInput" onkeyup="filterFiles()" placeholder="Search files..." class="bg-zinc-900 border border-zinc-700 text-white text-xs p-2 rounded-lg outline-none focus:border-yellow-500 w-full md:w-48" />
+                <input id="searchInput" onkeyup="filterFiles()" placeholder="Search..." class="bg-zinc-900 border border-zinc-700 text-white text-xs p-2 rounded-lg outline-none focus:border-yellow-500 w-full md:w-48" />
                 <div class="flex bg-zinc-900 p-1 rounded-lg shrink-0">
                     <button onclick="switchTab('all')" class={`px-3 py-1 text-[10px] font-bold rounded-md transition ${filterType === 'all' ? 'bg-yellow-500 text-black' : 'text-gray-400'}`}>ALL</button>
                     <button onclick="switchTab('video')" class={`px-3 py-1 text-[10px] font-bold rounded-md transition ${filterType === 'video' ? 'bg-yellow-500 text-black' : 'text-gray-400'}`}>VID</button>
@@ -360,14 +398,9 @@ app.get("/", async (c) => {
                     const viewLink = `/d/${f.server}/${f.r2Key}?action=view`;
                     return (
                     <div class="file-item bg-zinc-800/50 hover:bg-zinc-800 p-3 rounded-xl border border-transparent hover:border-zinc-600 group transition" data-name={f.name}>
-                        {/* Mobile Layout Fix: Column on small, Row on md */}
                         <div class="flex flex-col md:flex-row md:items-center justify-between gap-3">
-                            
-                            {/* Icon + Info */}
                             <div class="flex items-start gap-3 overflow-hidden w-full">
-                                <div class={`w-10 h-10 rounded-lg flex items-center justify-center text-lg flex-shrink-0 mt-1 ${f.type === 'image' ? 'bg-yellow-500/10 text-yellow-500' : f.type === 'video' ? 'bg-blue-500/10 text-blue-500' : 'bg-zinc-700 text-zinc-400'}`}>
-                                    <i class={`fa-solid ${f.type === 'image' ? 'fa-image' : f.type === 'video' ? 'fa-clapperboard' : 'fa-file'}`}></i>
-                                </div>
+                                <div class={`w-10 h-10 rounded-lg flex items-center justify-center text-lg flex-shrink-0 mt-1 ${f.type === 'image' ? 'bg-yellow-500/10 text-yellow-500' : f.type === 'video' ? 'bg-blue-500/10 text-blue-500' : 'bg-zinc-700 text-zinc-400'}`}><i class={`fa-solid ${f.type === 'image' ? 'fa-image' : f.type === 'video' ? 'fa-clapperboard' : 'fa-file'}`}></i></div>
                                 <div class="min-w-0 w-full">
                                     <a href={viewLink} target="_blank" class="font-bold text-sm text-zinc-200 group-hover:text-yellow-500 transition hover:underline block truncate">{f.name}</a>
                                     <div class="flex flex-wrap items-center gap-2 text-[10px] text-zinc-500 font-mono mt-1">
@@ -377,19 +410,12 @@ app.get("/", async (c) => {
                                     </div>
                                 </div>
                             </div>
-
-                            {/* Action Buttons (Full width on mobile, auto on desktop) */}
                             <div class="flex gap-2 w-full md:w-auto justify-end border-t border-zinc-700/50 pt-2 md:pt-0 md:border-0">
-                                {/* Edit Expiry (VIP Only) */}
                                 {isVip && <button onclick={`openEditModal('${f.id}', '${f.name}', '${f.expiresAt}')`} class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-yellow-600 hover:text-black text-white rounded-lg transition" title="Edit Expiry"><i class="fa-solid fa-pen text-xs"></i></button>}
-                                
-                                <button onclick={`navigator.clipboard.writeText(window.location.origin + '${viewLink}'); this.innerHTML='<i class="fa-solid fa-check text-green-500"></i>'; setTimeout(()=>this.innerHTML='<i class="fa-regular fa-copy"></i>', 1000)`} class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-white hover:text-black text-white rounded-lg transition" title="Copy Stream Link"><i class="fa-regular fa-copy text-xs"></i></button>
-                                
+                                <button onclick={`navigator.clipboard.writeText(window.location.origin + '${viewLink}'); showToast('Stream Link Copied!');`} class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-white hover:text-black text-white rounded-lg transition" title="Copy Stream Link"><i class="fa-regular fa-copy text-xs"></i></button>
                                 {(f.type === 'video' || f.type === 'image') && (<a href={viewLink} target="_blank" title="Play/View" class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-blue-500 text-white rounded-lg transition"><i class={`fa-solid ${f.type === 'video' ? 'fa-play' : 'fa-eye'} text-xs`}></i></a>)}
-                                
                                 <a href={downloadLink} target="_blank" title="Download" class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-green-600 text-white rounded-lg transition"><i class="fa-solid fa-download text-xs"></i></a>
-                                
-                                <form action={`/delete/${f.id}`} method="post" onsubmit="return confirm('ဖျက်မှာသေချာလား?')"><button class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-red-600 text-white rounded-lg transition"><i class="fa-solid fa-trash text-xs"></i></button></form>
+                                <button onclick={`confirmDelete('${f.id}')`} class="w-8 h-8 flex items-center justify-center bg-zinc-700 hover:bg-red-600 text-white rounded-lg transition"><i class="fa-solid fa-trash text-xs"></i></button>
                             </div>
                         </div>
                     </div>
@@ -404,8 +430,6 @@ app.get("/", async (c) => {
 // =======================
 // 5. API ROUTES
 // =======================
-
-// Presign
 app.post("/api/upload/presign", async (c) => {
     const cookie = getCookie(c, "auth"); const user = await getUser(cookie || "");
     if(!user) return c.json({error: "Login required"}, 401);
@@ -426,7 +450,6 @@ app.post("/api/upload/presign", async (c) => {
     return c.json({ url, key: r2Key, fileId });
 });
 
-// Remote Upload
 app.post("/api/upload/remote", async (c) => {
     const cookie = getCookie(c, "auth"); const user = await getUser(cookie || "");
     if(!user) return c.json({error: "Login required"}, 401);
@@ -472,7 +495,7 @@ app.post("/api/upload/remote", async (c) => {
     return new Response(bodyStream, { headers: { "Content-Type": "application/x-ndjson" } });
 });
 
-// Edit File Expiry (VIP)
+// Edit Expiry (VIP)
 app.post("/api/file/edit", async (c) => {
     const cookie = getCookie(c, "auth"); const user = await getUser(cookie || "");
     if(!user || !checkVipStatus(user)) return c.json({error: "Unauthorized or not VIP"}, 403);
@@ -487,7 +510,6 @@ app.post("/api/file/edit", async (c) => {
     return c.json({success: true});
 });
 
-// Upload Complete
 app.post("/api/upload/complete", async (c) => {
     const cookie = getCookie(c, "auth"); const user = await getUser(cookie || "");
     if(!user) return c.json({error: "Unauthorized"}, 401);
@@ -507,7 +529,6 @@ app.post("/api/upload/complete", async (c) => {
     } catch(e) { return c.json({ error: "Verification Failed" }, 500); }
 });
 
-// Download/Stream
 app.get("/d/:server/*", async (c) => {
     const server = c.req.param("server");
     const rawKey = c.req.path.split(`/d/${server}/`)[1]; 
@@ -524,7 +545,7 @@ app.get("/d/:server/*", async (c) => {
 });
 
 // =======================
-// 6. ADMIN & AUTH (Same as before)
+// 6. ADMIN & CRON
 // =======================
 app.get("/admin", async (c) => { 
     const cookie = getCookie(c, "auth"); const currentUser = await getUser(cookie || "");
@@ -549,6 +570,50 @@ app.post("/register", async (c) => { const { username, password } = await c.req.
 app.get("/logout", (c) => { deleteCookie(c, "auth"); return c.redirect("/login"); });
 app.get("/change-password", (c) => c.html(<Layout title="Change Password"><div class="max-w-sm mx-auto mt-20 glass p-8 rounded-xl"><h1 class="text-xl font-bold mb-4">စကားဝှက်ပြောင်းမည်</h1><form action="/change-password" method="post" class="space-y-4"><input type="password" name="newpass" placeholder="New Password" required class="w-full bg-zinc-900 border border-zinc-700 p-3 rounded-xl text-white" /><button class="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded-xl font-bold">အတည်ပြုမည်</button></form><a href="/" class="block text-center mt-4 text-xs text-gray-400">Back</a></div></Layout>));
 app.post("/change-password", async (c) => { const cookie = getCookie(c, "auth"); const user = await getUser(cookie || ""); if(!user) return c.redirect("/login"); const { newpass } = await c.req.parseBody(); if(String(newpass).length < 6) return c.text("Min 6 chars"); user.passwordHash = await hashPassword(String(newpass)); await kv.set(["users", user.username], user); return c.html(<Layout><div class="text-center mt-20"><p class="text-green-500 text-xl font-bold mb-4">Success!</p><a href="/" class="bg-zinc-800 px-4 py-2 rounded-lg text-sm">Home</a></div></Layout>); });
-Deno.cron("Cleanup", "0 * * * *", async () => { const now = Date.now(); const iter = kv.list<FileData>({ prefix: ["files"] }); for await (const entry of iter) { const file = entry.value; if (file.expiresAt > 0 && file.expiresAt < now) { await deleteFileFromR2(file); const username = entry.key[1] as string; const uRes = await kv.get<User>(["users", username]); if (uRes.value) { const u = uRes.value; await kv.atomic().delete(entry.key).set(["users", username], { ...u, usedStorage: Math.max(0, u.usedStorage - file.sizeBytes) }).commit(); } else { await kv.delete(entry.key); } } } });
+
+// =======================
+// 8. CRON: AUTO CLEANUP & VIP EXPIRY CHECK
+// =======================
+Deno.cron("Cleanup", "0 * * * *", async () => {
+    const now = Date.now();
+    
+    // 1. Check for Expired VIPs > 7 Days Grace Period
+    const usersIter = kv.list<User>({ prefix: ["users"] });
+    for await (const uEntry of usersIter) {
+        const u = uEntry.value;
+        // If not VIP anymore, but has expiry date (meaning was VIP) AND grace period over
+        if (!u.isVip && u.vipExpiry) {
+            const graceEnd = u.vipExpiry + VIP_GRACE_PERIOD_MS;
+            if (now > graceEnd) {
+                console.log(`Deleting all files for expired VIP: ${u.username}`);
+                // Delete ALL files of this user
+                const filesIter = kv.list<FileData>({ prefix: ["files", u.username] });
+                for await (const fEntry of filesIter) {
+                    await deleteFileFromR2(fEntry.value);
+                    await kv.delete(fEntry.key);
+                }
+                // Reset User
+                u.usedStorage = 0;
+                u.vipExpiry = undefined; // Stop checking
+                await kv.set(uEntry.key, u);
+            }
+        }
+    }
+
+    // 2. Normal File Expiry Cleanup
+    const filesIter = kv.list<FileData>({ prefix: ["files"] });
+    for await (const entry of filesIter) {
+        const file = entry.value;
+        if (file.expiresAt > 0 && file.expiresAt < now) {
+            await deleteFileFromR2(file);
+            const username = entry.key[1] as string;
+            const uRes = await kv.get<User>(["users", username]);
+            if (uRes.value) {
+                const u = uRes.value;
+                await kv.atomic().delete(entry.key).set(["users", username], { ...u, usedStorage: Math.max(0, u.usedStorage - file.sizeBytes) }).commit();
+            } else { await kv.delete(entry.key); }
+        }
+    }
+});
 
 Deno.serve(app.fetch);
