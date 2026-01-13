@@ -84,10 +84,28 @@ function formatDate(ts: number) {
 }
 
 // =======================
-// 3. UI SCRIPTS (DIRECT UPLOAD LOGIC)
+// 3. UI SCRIPTS (DIRECT UPLOAD & FILE NAME FIX)
 // =======================
 const mainScript = `
 <script>
+    // 🔥 1. FILE SELECTION LISTENER
+    document.addEventListener("DOMContentLoaded", () => {
+        const fileInput = document.getElementById('fileInput');
+        const fileNameDisplay = document.getElementById('fileNameDisplay');
+        const uploadIcon = document.getElementById('uploadIcon');
+
+        if(fileInput) {
+            fileInput.addEventListener('change', function() {
+                if (this.files && this.files.length > 0) {
+                    fileNameDisplay.innerText = this.files[0].name;
+                    fileNameDisplay.classList.remove('text-zinc-300');
+                    fileNameDisplay.classList.add('text-yellow-500', 'font-bold');
+                    uploadIcon.className = "fa-solid fa-check text-xl text-green-500";
+                }
+            });
+        }
+    });
+
     function switchTab(tab) {
         document.querySelectorAll('.file-item').forEach(el => el.classList.add('hidden'));
         document.querySelectorAll('.tab-btn').forEach(el => {
@@ -108,7 +126,7 @@ const mainScript = `
         const progressContainer = document.getElementById('progressContainer');
         const progressText = document.getElementById('progressText');
 
-        if(fileInput.files.length === 0) { alert("ဖိုင်ရွေးပါ"); return; }
+        if(fileInput.files.length === 0) { alert("ကျေးဇူးပြု၍ ဖိုင်ရွေးချယ်ပါ"); return; }
         
         const file = fileInput.files[0];
         const isVip = document.body.dataset.vip === "true";
@@ -119,7 +137,6 @@ const mainScript = `
             return;
         }
 
-        // Form Data
         const customName = document.getElementsByName('customName')[0].value;
         const expiry = document.getElementsByName('expiry')[0].value;
         const server = document.querySelector('input[name="server"]:checked').value;
@@ -127,10 +144,10 @@ const mainScript = `
         // UI Update
         progressContainer.classList.remove('hidden');
         submitBtn.disabled = true;
-        submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Getting Signed URL...';
+        submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Getting URL...';
 
         try {
-            // 1. Get Presigned URL from Server
+            // 1. Get Presigned URL
             const presignRes = await fetch("/api/get-upload-url", {
                 method: "POST",
                 body: JSON.stringify({
@@ -145,8 +162,8 @@ const mainScript = `
             if(!presignRes.ok) throw new Error(await presignRes.text());
             const { uploadUrl, key, finalUrl } = await presignRes.json();
 
-            // 2. Upload Directly to R2 (Bypassing Server Limit)
-            submitBtn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> Uploading to R2...';
+            // 2. Upload Directly to R2
+            submitBtn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> Uploading...';
             
             const xhr = new XMLHttpRequest();
             xhr.upload.addEventListener("progress", (e) => {
@@ -162,7 +179,7 @@ const mainScript = `
             
             xhr.onload = async () => {
                 if (xhr.status === 200) {
-                    // 3. Save Metadata to DB
+                    // 3. Save Metadata
                     submitBtn.innerHTML = 'Saving Data...';
                     await fetch("/api/save-file-data", {
                         method: "POST",
@@ -183,11 +200,11 @@ const mainScript = `
                     submitBtn.innerHTML = '<i class="fa-solid fa-check"></i> ပြီးပါပြီ!';
                     setTimeout(() => window.location.reload(), 1000);
                 } else {
-                    throw new Error("R2 Upload Failed");
+                    throw new Error("Upload Failed");
                 }
             };
             
-            xhr.onerror = () => { throw new Error("Network Error"); };
+            xhr.onerror = () => { throw new Error("Connection Error"); };
             xhr.send(file);
 
         } catch (e) {
@@ -243,7 +260,7 @@ const Layout = (props: { children: any; title?: string; user?: User | null }) =>
 );
 
 // =======================
-// 4. MAIN ROUTES
+// 4. ROUTES
 // =======================
 
 app.get("/", async (c) => {
@@ -269,6 +286,7 @@ app.get("/", async (c) => {
 
     return c.html(
         <Layout user={user}>
+            {/* STATS */}
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
                 <div class="glass p-5 rounded-2xl relative overflow-hidden group">
                     <p class="text-xs text-zinc-400 uppercase font-bold mb-1">အကောင့်</p>
@@ -289,6 +307,7 @@ app.get("/", async (c) => {
                 </div>
             </div>
 
+            {/* UPLOAD FORM */}
             <div class="glass p-6 rounded-2xl mb-8 border border-zinc-700/50 shadow-2xl">
                 <h2 class="font-bold text-lg mb-6 flex items-center gap-2 text-white"><span class="bg-blue-600 w-8 h-8 rounded-lg flex items-center justify-center text-sm"><i class="fa-solid fa-cloud-arrow-up"></i></span> ဖိုင်အသစ် တင်ရန်</h2>
                 <form id="uploadForm" onsubmit="uploadFile(event)" class="space-y-5">
@@ -314,10 +333,19 @@ app.get("/", async (c) => {
                         <label class="cursor-pointer relative"><input type="radio" name="server" value="1" class="peer sr-only" checked /><div class="p-3 bg-zinc-900 border border-zinc-700 rounded-xl peer-checked:border-blue-500 peer-checked:bg-blue-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-300 peer-checked:text-white">Server 1</span></div></label>
                         <label class="cursor-pointer relative"><input type="radio" name="server" value="2" class="peer sr-only" /><div class="p-3 bg-zinc-900 border border-zinc-700 rounded-xl peer-checked:border-yellow-500 peer-checked:bg-yellow-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-300 peer-checked:text-white">Server 2</span></div></label>
                     </div>
+                    
+                    {/* 🔥 UPDATED FILE INPUT WITH ID HOOKS */}
                     <div class="border-2 border-dashed border-zinc-700 rounded-2xl p-8 text-center hover:border-yellow-500/50 hover:bg-zinc-800/50 transition cursor-pointer group relative">
                         <input type="file" id="fileInput" name="file" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/>
-                        <div class="space-y-2"><div class="w-12 h-12 bg-zinc-800 rounded-full flex items-center justify-center mx-auto text-zinc-400 group-hover:text-yellow-500 transition"><i class="fa-solid fa-plus text-xl"></i></div><p class="text-sm font-bold text-zinc-300">Click to upload file</p><p class="text-[10px] text-zinc-500">{isVip ? "Max Size: Unlimited" : "Max Size: 20MB"}</p></div>
+                        <div class="space-y-2 pointer-events-none">
+                            <div class="w-12 h-12 bg-zinc-800 rounded-full flex items-center justify-center mx-auto text-zinc-400 group-hover:text-yellow-500 transition">
+                                <i id="uploadIcon" class="fa-solid fa-plus text-xl"></i>
+                            </div>
+                            <p id="fileNameDisplay" class="text-sm font-bold text-zinc-300 truncate px-4">ဖိုင်ရွေးချယ်ရန် နှိပ်ပါ</p>
+                            <p class="text-[10px] text-zinc-500">{isVip ? "Max Size: Unlimited" : "Max Size: 20MB"}</p>
+                        </div>
                     </div>
+
                     <div id="progressContainer" class="hidden"><div class="flex justify-between text-[10px] uppercase font-bold text-zinc-400 mb-1"><span>Uploading...</span><span id="progressText">0%</span></div><div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="progressBar" class="bg-yellow-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div></div></div>
                     <button id="submitBtn" class="w-full bg-gradient-to-r from-yellow-600 to-yellow-500 text-black font-bold py-3.5 rounded-xl shadow-lg hover:brightness-110 transition active:scale-95">တင်မည်</button>
                 </form>
@@ -350,7 +378,7 @@ app.get("/", async (c) => {
     );
 });
 
-// 🔥 API 1: GET PRESIGNED URL (For Direct Upload)
+// 🔥 API 1: GET PRESIGNED URL
 app.post("/api/get-upload-url", async (c) => {
     const cookie = getCookie(c, "auth");
     if(!cookie) return c.text("Unauthorized", 401);
@@ -360,13 +388,11 @@ app.post("/api/get-upload-url", async (c) => {
     const isVip = checkVipStatus(user);
     const { name, type, size, customName, server } = await c.req.json();
 
-    // Limit Check
     if (!isVip) {
         if (size > FREE_UPLOAD_LIMIT) return c.text("Free Limit Exceeded (Max 20MB)", 403);
         if (user.usedStorage + size > FREE_STORAGE_LIMIT) return c.text("Storage Full (Max 200MB)", 403);
     }
 
-    // Rename
     let finalName = name;
     if (customName) {
         const ext = name.split('.').pop();
@@ -375,11 +401,9 @@ app.post("/api/get-upload-url", async (c) => {
     const safeName = finalName.replace(/[^a-zA-Z0-9.-]/g, "_");
     const r2Key = `${user.username}/${crypto.randomUUID()}-${safeName}`;
 
-    // Select Client
     const client = server === "1" ? s3Server1 : s3Server2;
     const bucket = server === "1" ? Deno.env.get("R2_1_BUCKET_NAME") : Deno.env.get("R2_2_BUCKET_NAME");
 
-    // Generate Signed URL
     const command = new PutObjectCommand({
         Bucket: bucket,
         Key: r2Key,
@@ -393,7 +417,7 @@ app.post("/api/get-upload-url", async (c) => {
     return c.json({ uploadUrl, key: r2Key, finalUrl });
 });
 
-// 🔥 API 2: SAVE FILE DATA (After Upload)
+// 🔥 API 2: SAVE FILE DATA
 app.post("/api/save-file-data", async (c) => {
     const cookie = getCookie(c, "auth");
     const user = await getUser(cookie || "");
@@ -401,7 +425,7 @@ app.post("/api/save-file-data", async (c) => {
 
     const { key, name, customName, size, type, server, finalUrl, expiry } = await c.req.json();
     const isVip = checkVipStatus(user);
-    const expiryDays = isVip ? parseInt(expiry) : 30; // Free = 30 days mandatory
+    const expiryDays = isVip ? parseInt(expiry) : 30;
 
     const fileData: FileData = {
         id: crypto.randomUUID(),
@@ -512,6 +536,17 @@ app.post("/register", async (c) => {
     return c.redirect("/login");
 });
 app.get("/logout", (c) => { deleteCookie(c, "auth"); return c.redirect("/login"); });
+app.get("/change-password", (c) => c.html(<Layout title="Change Password"><div class="max-w-sm mx-auto mt-20 glass p-8 rounded-xl"><h1 class="text-xl font-bold mb-4">စကားဝှက်ပြောင်းမည်</h1><form action="/change-password" method="post" class="space-y-4"><input type="password" name="newpass" placeholder="New Password" required class="w-full bg-zinc-900 border border-zinc-700 p-3 rounded-xl text-white" /><button class="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded-xl font-bold">အတည်ပြုမည်</button></form><a href="/" class="block text-center mt-4 text-xs text-gray-400">Back</a></div></Layout>));
+app.post("/change-password", async (c) => {
+    const cookie = getCookie(c, "auth");
+    const user = await getUser(cookie || "");
+    if(!user) return c.redirect("/login");
+    const { newpass } = await c.req.parseBody();
+    if(String(newpass).length < 6) return c.text("Password too short");
+    user.passwordHash = await hashPassword(String(newpass));
+    await kv.set(["users", user.username], user);
+    return c.redirect("/");
+});
 
 // ADMIN
 app.get("/admin", async (c) => {
