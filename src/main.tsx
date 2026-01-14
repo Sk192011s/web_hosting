@@ -106,15 +106,15 @@ function isVipActive(user: User): boolean { if (user.plan === 'free') return fal
 function formatDate(ts: number) { return new Date(ts).toLocaleDateString('my-MM', { day: 'numeric', month: 'short', year: 'numeric' }); }
 function mimeToExt(mime: string): string { const m: any = {'video/mp4':'mp4','video/webm':'webm','video/x-matroska':'mkv','image/jpeg':'jpg','image/png':'png'}; return m[mime.split(';')[0]] || 'bin'; }
 
-// =======================
-// 3. FRONTEND UI & SCRIPTS
-// =======================
 const mainScript = `
 <script>
     const IS_USER_VIP = window.IS_VIP_USER || false;
     let targetFileId = null; 
+    
+    // Cancel အတွက် Variables
+    let activeXHR = null; // Local Upload အတွက်
+    let activeRemoteController = null; // Remote Upload အတွက်
 
-    // FOUC Fix
     document.body.style.opacity = '1';
 
     function switchTab(tab) {
@@ -137,6 +137,7 @@ const mainScript = `
         document.getElementById('btn-mode-' + mode).classList.add('bg-yellow-500', 'text-black');
     }
 
+    // Modal Functions
     function openDeleteModal(fileId) { targetFileId = fileId; document.getElementById('deleteModal').classList.remove('hidden'); }
     function openEditModal(fileId) { if (!IS_USER_VIP) return; targetFileId = fileId; document.getElementById('editModal').classList.remove('hidden'); }
     function closeModal(id) { document.getElementById(id).classList.add('hidden'); targetFileId = null; }
@@ -156,36 +157,28 @@ const mainScript = `
 
     async function confirmEdit() {
         if(!targetFileId) return;
-        const days = document.getElementById('editExpirySelect').value;
         const btn = document.getElementById('btnConfirmEdit');
         btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ပြင်နေသည်...';
         btn.disabled = true;
-
         try {
             const res = await fetch('/api/file/edit', { 
-                method: 'POST', 
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ fileId: targetFileId, days: days, csrf: window.CSRF_TOKEN }) 
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ fileId: targetFileId, days: document.getElementById('editExpirySelect').value, csrf: window.CSRF_TOKEN }) 
             });
             const d = await res.json();
-            if(d.success) window.location.reload();
-            else alert(d.error);
+            if(d.success) window.location.reload(); else alert(d.error);
         } catch(e) { alert("Error"); }
     }
 
-    // SEARCH (Server side redirect for better UX)
     function handleSearch(e) {
         if(e.key === 'Enter') {
-            const val = e.target.value;
             const url = new URL(window.location);
-            if(val) url.searchParams.set('q', val);
-            else url.searchParams.delete('q');
+            if(e.target.value) url.searchParams.set('q', e.target.value); else url.searchParams.delete('q');
             url.searchParams.delete('cursor');
             window.location.href = url.toString();
         }
     }
 
-    // UPLOAD LOGIC
     document.addEventListener("DOMContentLoaded", () => {
         const fileInput = document.getElementById('fileInput');
         if(fileInput) {
@@ -198,6 +191,21 @@ const mainScript = `
         }
     });
 
+    // --- LOCAL UPLOAD & CANCEL ---
+    function cancelLocal() {
+        if(activeXHR) {
+            activeXHR.abort(); // Upload ကို ရပ်မယ်
+            activeXHR = null;
+            
+            // UI ပြန် reset မယ်
+            document.getElementById('progressContainer').classList.add('hidden');
+            document.getElementById('submitBtn').disabled = false;
+            document.getElementById('submitBtn').innerHTML = 'တင်မည်';
+            document.getElementById('progressBar').style.width = '0%';
+            alert("Upload Cancelled");
+        }
+    }
+
     async function uploadLocal(event) {
         event.preventDefault();
         const fileInput = document.getElementById('fileInput');
@@ -206,7 +214,12 @@ const mainScript = `
         if(fileInput.files.length === 0) { alert("ဖိုင်ရွေးပေးပါ"); return; }
         
         submitBtn.disabled = true; submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> စစ်ဆေးနေသည်...';
+        
+        // Progress Show
         document.getElementById('progressContainer').classList.remove('hidden');
+        document.getElementById('progressBar').classList.remove('bg-green-500');
+        document.getElementById('progressBar').classList.add('bg-yellow-500');
+        document.getElementById('cancelBtnLocal').classList.remove('hidden'); // Cancel ခလုတ်ပြမယ်
 
         try {
             const formData = new FormData(form);
@@ -226,22 +239,23 @@ const mainScript = `
             const { url, key, fileId } = await presignRes.json();
 
             submitBtn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> တင်နေပါသည်...';
-            const xhr = new XMLHttpRequest();
-            xhr.open("PUT", url, true);
-            xhr.setRequestHeader("Content-Type", fileInput.files[0].type);
-            xhr.upload.onprogress = (e) => {
+            
+            activeXHR = new XMLHttpRequest();
+            activeXHR.open("PUT", url, true);
+            activeXHR.setRequestHeader("Content-Type", fileInput.files[0].type);
+            activeXHR.upload.onprogress = (e) => {
                 if (e.lengthComputable) {
                     const percent = Math.round((e.loaded / e.total) * 100);
                     document.getElementById('progressBar').style.width = percent + "%";
                     document.getElementById('progressText').innerText = percent + "%";
                 }
             };
-            xhr.onload = async () => {
-                if (xhr.status === 200) {
+            activeXHR.onload = async () => {
+                if (activeXHR.status === 200) {
                     submitBtn.innerHTML = 'သိမ်းဆည်းနေသည်...';
+                    document.getElementById('cancelBtnLocal').classList.add('hidden'); // ပြီးရင် Cancel ဖျောက်မယ်
                     await fetch("/api/upload/complete", { 
-                        method: "POST", 
-                        headers: { "Content-Type": "application/json" }, 
+                        method: "POST", headers: { "Content-Type": "application/json" }, 
                         body: JSON.stringify({ key, fileId, server: formData.get("server"), expiry: formData.get("expiry"), csrf: window.CSRF_TOKEN }) 
                     });
                     document.getElementById('progressBar').classList.add('bg-green-500');
@@ -249,8 +263,31 @@ const mainScript = `
                     setTimeout(() => window.location.reload(), 1000);
                 } else { throw new Error("Upload Failed"); }
             };
-            xhr.send(fileInput.files[0]);
-        } catch (error) { alert(error.message); submitBtn.disabled = false; submitBtn.innerText = "ပြန်ကြိုးစားပါ"; document.getElementById('progressContainer').classList.add('hidden'); }
+            activeXHR.onerror = () => { throw new Error("Network Error"); };
+            activeXHR.send(fileInput.files[0]);
+
+        } catch (error) { 
+            // Abort ကြောင့်ဖြစ်တဲ့ Error ဆိုရင် ဘာမှမလုပ်ဘူး
+            if(activeXHR && activeXHR.status === 0 && error.message === "Network Error") return;
+            
+            alert(error.message); 
+            submitBtn.disabled = false; submitBtn.innerText = "ပြန်ကြိုးစားပါ"; 
+            document.getElementById('progressContainer').classList.add('hidden'); 
+        }
+    }
+
+    // --- REMOTE UPLOAD & CANCEL ---
+    function cancelRemote() {
+        if(activeRemoteController) {
+            activeRemoteController.abort(); // Connection ဖြတ်မယ်
+            activeRemoteController = null;
+
+            document.getElementById('progressContainerRemote').classList.add('hidden');
+            document.getElementById('remoteBtn').disabled = false;
+            document.getElementById('remoteBtn').innerHTML = 'Remote Upload (Max 2GB)';
+            document.getElementById('progressBarRemote').style.width = '0%';
+            alert("Remote Upload Cancelled");
+        }
     }
 
     async function uploadRemote(event) {
@@ -260,12 +297,20 @@ const mainScript = `
         if(!urlInput.value) { alert("URL ထည့်ပေးပါ"); return; }
         
         submitBtn.disabled = true; submitBtn.innerHTML = '<i class="fa-solid fa-satellite-dish fa-spin"></i> ချိတ်ဆက်နေသည်...';
+        
         document.getElementById('progressContainerRemote').classList.remove('hidden');
+        document.getElementById('progressBarRemote').classList.remove('bg-green-500');
+        document.getElementById('progressBarRemote').classList.add('bg-yellow-500');
         document.getElementById('progressBarRemote').style.width = "0%";
+        document.getElementById('cancelBtnRemote').classList.remove('hidden'); // Cancel ပြမယ်
+
+        activeRemoteController = new AbortController();
 
         try {
             const response = await fetch('/api/upload/remote', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' },
+                signal: activeRemoteController.signal, // Cancel Signal ထည့်မယ်
                 body: JSON.stringify({
                     url: urlInput.value,
                     customName: document.getElementById('remoteName').value,
@@ -290,20 +335,26 @@ const mainScript = `
                         const msg = JSON.parse(line);
                         if (msg.error) throw new Error(msg.error);
                         if (msg.progress) {
-                             if (msg.progress < 99) submitBtn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> ဒေါင်းလုဒ်ဆွဲပြီးတင်နေသည်...';
+                             if (msg.progress < 99) submitBtn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> ဒေါင်းလုဒ်ဆွဲနေသည်...';
                              else submitBtn.innerHTML = '<i class="fa-solid fa-floppy-disk fa-spin"></i> သိမ်းဆည်းနေသည်...';
                              document.getElementById('progressBarRemote').style.width = msg.progress + "%";
                              document.getElementById('progressTextRemote').innerText = msg.progress + "%";
                         }
                         if (msg.done) {
                             document.getElementById('progressBarRemote').classList.add('bg-green-500');
-                            submitBtn.innerHTML = 'အောင်မြင်ပါသည်';
+                            document.getElementById('cancelBtnRemote').classList.add('hidden');
+                            submitBtn.innerHTML = 'အောင်မြင်သည်';
                             setTimeout(() => window.location.reload(), 1000);
                         }
                     } catch (e) { throw e; }
                 }
             }
-        } catch (e) { alert("Error: " + e.message); submitBtn.disabled = false; submitBtn.innerText = "ပြန်ကြိုးစားပါ"; document.getElementById('progressContainerRemote').classList.add('hidden'); }
+        } catch (e) { 
+            if(e.name === 'AbortError') return; // Cancel ကြောင့်ဆို Error မပြနဲ့
+            alert("Error: " + e.message); 
+            submitBtn.disabled = false; submitBtn.innerText = "ပြန်ကြိုးစားပါ"; 
+            document.getElementById('progressContainerRemote').classList.add('hidden'); 
+        }
     }
 </script>
 `;
@@ -423,16 +474,42 @@ app.get("/", async (c) => {
         )}
 
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+            
+            {/* ၁။ Plan & Username Card (ဒီအကွက်ကို ပြင်ထားပါတယ်) */}
             <div class="glass p-5 rounded-2xl relative overflow-hidden group">
-                <p class="text-xs text-zinc-500 uppercase font-bold mb-1">လက်ရှိအစီအစဉ်</p>
-                <p class={`text-2xl font-black ${isVipActive(user) ? 'text-yellow-500' : 'text-zinc-300'}`}>{currentPlan.name}</p>
-                {user.vipExpiry ? (<p class={`text-[10px] mt-2 font-mono px-2 py-1 rounded inline-block ${user.vipExpiry > now ? 'text-green-400 bg-green-900/20' : 'text-red-400 bg-red-900/20'}`}>{user.vipExpiry > now ? `သက်တမ်း: ${formatDate(user.vipExpiry)}` : `ကုန်ဆုံး: ${formatDate(user.vipExpiry)}`}</p>) : <p class="text-[10px] mt-2 text-zinc-500">Free Version</p>}
-                <a href="/change-password" class="absolute bottom-4 right-4 text-xs text-zinc-500 hover:text-white transition"><i class="fa-solid fa-key mr-1"></i> Pass</a>
+                <div class="flex justify-between items-start">
+                    <div>
+                        <p class="text-xs text-zinc-500 uppercase font-bold mb-1">လက်ရှိအစီအစဉ်</p>
+                        <p class={`text-2xl font-black ${isVipActive(user) ? 'text-yellow-500' : 'text-zinc-300'}`}>{currentPlan.name}</p>
+                    </div>
+                    {/* Password Change Link */}
+                    <a href="/change-password" class="text-zinc-600 hover:text-white transition" title="Change Password"><i class="fa-solid fa-key"></i></a>
+                </div>
+
+                {/* --- NEW: Username Display Section --- */}
+                <div class="mt-4 bg-black/40 border border-zinc-700/50 rounded-xl p-3 flex items-center justify-between">
+                    <div>
+                        <p class="text-[9px] text-zinc-500 uppercase font-bold">သင့် Username (Admin သို့ပို့ရန်)</p>
+                        <p class="text-lg font-bold text-white font-mono tracking-wider select-all">{user.username}</p>
+                    </div>
+                    <button onclick={`navigator.clipboard.writeText('${user.username}'); this.innerHTML='<i class="fa-solid fa-check text-green-500"></i>'; setTimeout(()=>this.innerHTML='<i class="fa-regular fa-copy"></i>', 1000)`} class="w-10 h-10 bg-zinc-800 hover:bg-zinc-700 rounded-lg flex items-center justify-center text-zinc-400 hover:text-white transition shadow-lg" title="Copy Username">
+                        <i class="fa-regular fa-copy"></i>
+                    </button>
+                </div>
+                {/* ------------------------------------- */}
+
+                <div class="mt-3">
+                    {user.vipExpiry ? (<p class={`text-[10px] font-mono px-2 py-1 rounded inline-block ${user.vipExpiry > now ? 'text-green-400 bg-green-900/20' : 'text-red-400 bg-red-900/20'}`}>{user.vipExpiry > now ? `VIP သက်တမ်း: ${formatDate(user.vipExpiry)}` : `သက်တမ်းကုန်ဆုံး: ${formatDate(user.vipExpiry)}`}</p>) : <p class="text-[10px] text-zinc-500"><i class="fa-solid fa-circle-info mr-1"></i> Free Version</p>}
+                </div>
             </div>
+
+            {/* ၂။ Storage Card (ပုံမှန်အတိုင်း) */}
             <div class="glass p-5 rounded-2xl relative">
                 <div class="flex justify-between items-end mb-2"><div><p class="text-xs text-zinc-500 uppercase font-bold">သိုလှောင်ခန်း</p><p class="text-xl font-bold text-white">{totalGB} <span class="text-sm text-zinc-500">GB / {displayLimit}</span></p></div><span class="text-2xl font-black text-zinc-700">{usedPercent.toFixed(0)}%</span></div>
                 <div class="w-full bg-zinc-800 rounded-full h-3 overflow-hidden"><div class={`h-full rounded-full ${isVipActive(user) ? 'bg-gradient-to-r from-yellow-600 to-yellow-400' : 'bg-zinc-600'}`} style={`width: ${usedPercent}%`}></div></div>
             </div>
+
+            {/* ၃။ Features Card (ပုံမှန်အတိုင်း) */}
             <div class="glass p-5 rounded-2xl flex flex-col justify-center gap-2">
                 <div class="text-xs text-zinc-400 mb-1 font-bold uppercase">VIP အကျိုးခံစားခွင့်</div>
                 <ul class="text-[10px] text-gray-400 space-y-1">
@@ -497,7 +574,16 @@ app.get("/", async (c) => {
                         <input type="file" id="fileInput" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/>
                         <div class="space-y-2 pointer-events-none"><div class="w-12 h-12 bg-zinc-800 rounded-full flex items-center justify-center mx-auto text-zinc-400 group-hover:text-yellow-500 transition"><i id="uploadIcon" class="fa-solid fa-plus text-xl"></i></div><p id="fileNameDisplay" class="text-sm font-bold text-zinc-300 truncate px-4">ဖိုင်ရွေးချယ်ရန် နှိပ်ပါ</p><p class="text-[10px] text-zinc-500">{isVipActive(user) ? "Size: Unlimited" : "Size Limit: 50GB"}</p></div>
                     </div>
-                    <div id="progressContainer" class="hidden"><div class="flex justify-between text-[10px] uppercase font-bold text-zinc-400 mb-1"><span>Uploading...</span><span id="progressText">0%</span></div><div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="progressBar" class="bg-yellow-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div></div></div>
+                    
+                    {/* Progress with Cancel Button */}
+                    <div id="progressContainer" class="hidden">
+                        <div class="flex justify-between text-[10px] uppercase font-bold text-zinc-400 mb-1"><span>Uploading...</span><span id="progressText">0%</span></div>
+                        <div class="flex items-center gap-3">
+                            <div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="progressBar" class="bg-yellow-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div></div>
+                            <button type="button" id="cancelBtnLocal" onclick="cancelLocal()" class="bg-red-600 hover:bg-red-500 text-white w-6 h-6 rounded-full flex items-center justify-center transition flex-shrink-0" title="Cancel Upload"><i class="fa-solid fa-xmark text-xs"></i></button>
+                        </div>
+                    </div>
+
                     <button id="submitBtn" class="w-full bg-yellow-500 text-black font-bold py-3.5 rounded-xl shadow-lg hover:bg-yellow-400 transition active:scale-95">တင်မည်</button>
                 </form>
             </div>
@@ -523,7 +609,16 @@ app.get("/", async (c) => {
                         <label class="cursor-pointer relative"><input type="radio" name="server_remote" value="1" class="peer sr-only" checked /><div class="p-3 bg-black border border-zinc-700 rounded-xl peer-checked:border-blue-500 peer-checked:bg-blue-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-400 peer-checked:text-white">Server 1</span></div></label>
                         <label class="cursor-pointer relative"><input type="radio" name="server_remote" value="2" class="peer sr-only" /><div class="p-3 bg-black border border-zinc-700 rounded-xl peer-checked:border-yellow-500 peer-checked:bg-yellow-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-sm block text-gray-400 peer-checked:text-white">Server 2</span></div></label>
                     </div>
-                    <div id="progressContainerRemote" class="hidden"><div class="flex justify-between text-[10px] uppercase font-bold text-zinc-400 mb-1"><span>Processing...</span><span id="progressTextRemote">0%</span></div><div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="progressBarRemote" class="bg-yellow-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div></div></div>
+
+                    {/* Progress with Cancel Button */}
+                    <div id="progressContainerRemote" class="hidden">
+                        <div class="flex justify-between text-[10px] uppercase font-bold text-zinc-400 mb-1"><span>Processing...</span><span id="progressTextRemote">0%</span></div>
+                        <div class="flex items-center gap-3">
+                            <div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="progressBarRemote" class="bg-yellow-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div></div>
+                            <button type="button" id="cancelBtnRemote" onclick="cancelRemote()" class="bg-red-600 hover:bg-red-500 text-white w-6 h-6 rounded-full flex items-center justify-center transition flex-shrink-0" title="Cancel Upload"><i class="fa-solid fa-xmark text-xs"></i></button>
+                        </div>
+                    </div>
+
                     <button id="remoteBtn" class="w-full bg-zinc-800 text-white border border-zinc-700 font-bold py-3.5 rounded-xl shadow-lg hover:bg-yellow-600 hover:text-black transition">Remote Upload (Max 2GB)</button>
                 </form>
             </div>
