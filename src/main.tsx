@@ -126,9 +126,11 @@ const mainScript = `
     
     function switchUploadMode(mode) {
         if (mode === 'remote' && !IS_USER_VIP) {
-            alert("⚠️ VIP Only Feature!\\n\\nRemote Upload ကိုအသုံးပြုရန် အကောင့်အဆင့်မြှင့်ပါ။");
+            // Alert အစား Modal ကို ဖွင့်ခိုင်းလိုက်တာပါ
+            document.getElementById('vipModal').classList.remove('hidden'); 
             return;
         }
+        // ... အောက်ကကုဒ်တွေ အတူတူပဲ ...
         document.querySelectorAll('.upload-mode').forEach(el => el.classList.add('hidden'));
         document.querySelectorAll('.mode-btn').forEach(el => { el.classList.remove('bg-yellow-500', 'text-black'); el.classList.add('bg-zinc-800', 'text-gray-400'); });
         
@@ -387,7 +389,28 @@ const Layout = (props: { children: any; title?: string; user?: User | null, csrf
         <body data-vip={isVip ? "true" : "false"}>
             <nav class="fixed top-0 w-full z-50 glass border-b border-zinc-800 bg-black/80 backdrop-blur-md"><div class="max-w-5xl mx-auto px-4 py-3 flex justify-between items-center"><a href="/" class="text-xl font-black text-white italic tracking-tighter flex items-center gap-2"><i class="fa-solid fa-cube text-yellow-500"></i> <span class="bg-clip-text text-transparent bg-gradient-to-r from-yellow-400 to-yellow-600">GOLD STORAGE</span></a>{props.user ? (<div class="flex gap-3 items-center"><div class="hidden sm:flex flex-col items-end leading-tight"><span class="text-xs font-bold text-gray-300">{props.user.username}</span>{isVipActive(props.user) ? <span class="text-[9px] text-yellow-500 font-bold bg-yellow-500/10 px-1 rounded">VIP</span> : <span class="text-[9px] text-gray-500 font-bold bg-zinc-800 px-1 rounded">FREE</span>}</div>{props.user.username === ADMIN_USERNAME && <a href="/admin" class="w-8 h-8 flex items-center justify-center bg-purple-600 rounded-full hover:bg-purple-500 text-white"><i class="fa-solid fa-shield-halved text-xs"></i></a>}<a href="/logout" class="w-8 h-8 flex items-center justify-center bg-zinc-800 border border-zinc-700 rounded-full hover:bg-red-600/20 hover:text-red-500"><i class="fa-solid fa-power-off text-xs"></i></a></div>) : (<a href="/login" class="text-xs bg-yellow-500 text-black px-4 py-2 rounded-full font-bold hover:bg-yellow-400 transition">ဝင်မည်</a>)}</div></nav>
             <main class="pt-20 pb-10 px-4 max-w-5xl mx-auto">{props.children}</main>
-            
+            {/* VIP Warning Modal (New Custom Box) */}
+            <div id="vipModal" class="modal-overlay hidden">
+                <div class="modal-box text-center relative overflow-hidden">
+                    {/* အပေါ်ဆုံးက ရွှေရောင်အစင်းကြောင်းလေး */}
+                    <div class="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-yellow-600 to-yellow-400"></div>
+                    
+                    {/* Crown Icon */}
+                    <div class="w-16 h-16 bg-yellow-500/10 rounded-full flex items-center justify-center mx-auto mb-4 border border-yellow-500/20">
+                        <i class="fa-solid fa-crown text-3xl text-yellow-500"></i>
+                    </div>
+                    
+                    <h3 class="text-xl font-black text-white mb-2 tracking-wide">VIP ONLY</h3>
+                    <p class="text-sm text-gray-400 mb-6 leading-relaxed">
+                        Remote Upload စနစ်ကို အသုံးပြုရန်<br/>
+                        <span class="text-yellow-500 font-bold">VIP Member</span> ဝင်ထားရန် လိုအပ်ပါသည်။
+                    </p>
+                    
+                    <button onclick="closeModal('vipModal')" class="w-full bg-yellow-500 hover:bg-yellow-400 text-black font-bold py-3 rounded-xl transition shadow-lg shadow-yellow-500/20">
+                        နားလည်ပါပြီ
+                    </button>
+                </div>
+            </div>
             <div id="deleteModal" class="modal-overlay hidden">
                 <div class="modal-box text-center">
                     <div class="w-12 h-12 bg-red-900/30 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4"><i class="fa-solid fa-trash text-xl"></i></div>
