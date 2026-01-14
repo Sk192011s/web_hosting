@@ -432,7 +432,7 @@ const Layout = (props: { children: any; title?: string; user?: User | null, csrf
     <a href="https://t.me/iqowoq" target="_blank" class="text-zinc-500 hover:text-[#229ED9] transition flex items-center justify-center gap-2 text-sm font-bold">
         <i class="fa-brands fa-telegram text-xl"></i> Contact Admin
     </a>
-    <p class="text-[10px] text-zinc-600 mt-2">© 2024 Gold Storage Cloud</p>
+    <p class="text-[10px] text-zinc-600 mt-2">© 2026 Gold Storage Cloud</p>
 </footer>
             
             <div id="vipModal" class="modal-overlay hidden"><div class="modal-box text-center relative overflow-hidden"><div class="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-yellow-600 to-yellow-400"></div><div class="w-16 h-16 bg-yellow-500/10 rounded-full flex items-center justify-center mx-auto mb-4 border border-yellow-500/20"><i class="fa-solid fa-crown text-3xl text-yellow-500"></i></div><h3 class="text-xl font-black text-white mb-2 tracking-wide">VIP ONLY</h3><p class="text-sm text-gray-400 mb-6 leading-relaxed">Remote Upload စနစ်ကို အသုံးပြုရန်<br/><span class="text-yellow-500 font-bold">VIP Member</span> ဝင်ထားရန် လိုအပ်ပါသည်။</p><button onclick="closeModal('vipModal')" class="w-full bg-yellow-500 hover:bg-yellow-400 text-black font-bold py-3 rounded-xl transition shadow-lg shadow-yellow-500/20">နားလည်ပါပြီ</button></div></div>
