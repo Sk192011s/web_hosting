@@ -840,7 +840,7 @@ app.post("/api/upload/remote", async (c) => {
                         client, 
                         params: { Bucket: bucket, Key: r2Key, Body: stream as any, ContentType: contentType }, 
                         queueSize: 15, 
-                        partSize: 15 * 1024**2 
+                        partSize: 12 * 1024**2 
                     });
                     return { upload, fileId, r2Key, svr };
                 };
