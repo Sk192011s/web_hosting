@@ -728,7 +728,7 @@ app.post("/api/upload/presign", async (c) => {
     const bucket = server === "1" ? Deno.env.get("R2_1_BUCKET_NAME") : Deno.env.get("R2_2_BUCKET_NAME");
     
     const command = new PutObjectCommand({ Bucket: bucket, Key: r2Key, ContentType: type });
-    const url = await getSignedUrl(client, command, { expiresIn: 3600 });
+    const url = await getSignedUrl(client, command, { expiresIn: 10800 });
     return c.json({ url, key: r2Key, fileId });
 });
 
@@ -1037,7 +1037,7 @@ app.on(['GET', 'HEAD'], "/d/:server/*", async (c) => {
             ResponseContentDisposition: disposition 
         });
 
-        const url = await getSignedUrl(client, command, { expiresIn: 3600 });
+        const url = await getSignedUrl(client, command, { expiresIn: 10800 });
         
         // Redirect လုပ်ရာတွင်လည်း Caching ပိတ်ပါ
         c.header("Cache-Control", "no-cache, no-store, must-revalidate");
