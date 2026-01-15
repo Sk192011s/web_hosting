@@ -25,7 +25,7 @@ const STREAM_DOMAIN = "https://goldstorage2.deno.dev";
 
 const ADMIN_USERNAME = Deno.env.get("ADMIN_USERNAME") || "admin"; 
 const SECRET_KEY = Deno.env.get("SECRET_SALT") || "change-this-secret-salt-immediately";
-const MAX_REMOTE_SIZE = 5 * 1024 * 1024 * 1024; // 2 GB
+const MAX_REMOTE_SIZE = 15 * 1024 * 1024 * 1024; // 2 GB
 const ALLOWED_EXTENSIONS = new Set(['jpg','jpeg','png','gif','webp','mp4','mkv','webm','mov','mp3','wav','zip','rar','7z','pdf','txt','doc','docx']);
 const BLOCKED_EXTENSIONS = new Set(['exe','sh','php','svg','pl','py','js','html','htm','css','bat','cmd','msi','dll','apk']);
 
@@ -622,7 +622,7 @@ app.get("/", async (c) => {
                         <label class="cursor-pointer relative"><input type="radio" name="server_remote" value="both" class="peer sr-only" /><div class="p-3 bg-black border border-zinc-700 rounded-xl peer-checked:border-purple-500 peer-checked:bg-purple-500/10 text-center transition hover:bg-zinc-800"><span class="font-bold text-xs block text-gray-400 peer-checked:text-white">Both (1+2)</span></div></label>
                     </div>
                     <div id="progressContainerRemote" class="hidden"><div class="flex justify-between text-[10px] uppercase font-bold text-zinc-400 mb-1"><span>Processing...</span><span id="progressTextRemote">0%</span></div><div class="flex items-center gap-3"><div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="progressBarRemote" class="bg-yellow-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div></div><button type="button" id="cancelBtnRemote" onclick="cancelRemote()" class="bg-red-600 hover:bg-red-500 text-white w-6 h-6 rounded-full flex items-center justify-center transition flex-shrink-0" title="Cancel Upload"><i class="fa-solid fa-xmark text-xs"></i></button></div></div>
-                    <button id="remoteBtn" class="w-full bg-zinc-800 text-white border border-zinc-700 font-bold py-3.5 rounded-xl shadow-lg hover:bg-yellow-600 hover:text-black transition">Remote Upload (Max 5GB)</button>
+                    <button id="remoteBtn" class="w-full bg-zinc-800 text-white border border-zinc-700 font-bold py-3.5 rounded-xl shadow-lg hover:bg-yellow-600 hover:text-black transition">Remote Upload (Max 15GB)</button>
                 </form>
             </div>
         </div>
@@ -762,7 +762,7 @@ app.post("/api/upload/remote", async (c) => {
                 const limitBytes = PLANS[session.user.plan]?.limit || PLANS.free.limit;
                 const requiredSize = (server === "both") ? totalSize * 2 : totalSize;
                 
-                if(totalSize > MAX_REMOTE_SIZE) throw new Error("File too large (Max 5GB)");
+                if(totalSize > MAX_REMOTE_SIZE) throw new Error("File too large (Max 15GB)");
                 if(session.user.usedStorage + requiredSize > limitBytes) throw new Error("Storage Full");
 
                 let contentType = r.headers.get("content-type") || "application/octet-stream";
