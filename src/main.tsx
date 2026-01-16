@@ -582,7 +582,7 @@ const Layout = (props: { children: any; title?: string; user?: User | null, csrf
             <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet" />
             <link href="https://fonts.googleapis.com/css2?family=Padauk:wght@400;700&display=swap" rel="stylesheet" />
             <style>{`
-                body { font-family: 'Padauk', sans-serif; background-color: #050505; color: #e4e4e7; opacity: 0; transition: opacity 0.3s ease-in; }
+                body { font-family: 'Padauk', sans-serif; background-color: #050505; color: #e4e4e7; opacity: 1; transition: opacity 0.3s ease-in; }
                 .glass { background: #121212; border: 1px solid #27272a; }
                 .vip-card { background: linear-gradient(145deg, #18181b, #09090b); border: 1px solid #27272a; transition: 0.3s; }
                 .vip-card:hover { border-color: #eab308; transform: translateY(-5px); }
