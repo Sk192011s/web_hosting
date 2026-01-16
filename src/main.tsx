@@ -1034,8 +1034,8 @@ const r = await fetch(url, {
                             ContentDisposition: `attachment; filename="${encodeURIComponent(fileName)}"`
                         }, 
                         // RAM Saving (15 ဆိုရင် 5GB ဖိုင်မှာ ပျက်ကျနိုင်ပါတယ်၊ 1 က အငြိမ်ဆုံးပါ)
-                        queueSize: 15, 
-                        partSize: 10 * 1024**2 
+                        queueSize: 20, 
+                        partSize: 11 * 1024**2 
                     });
                     return { upload, fileId: id, r2Key: key, svr };
                 };
