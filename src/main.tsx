@@ -23,7 +23,7 @@ app.use('*', secureHeaders());
 
 const kv = await Deno.openKv();
 const STREAM_DOMAIN = "https://goldstorage2.deno.dev";
-const PROXY_URL = "https://proxy.avotc.tk";
+const PROXY_URL = "https://theinnaingwincloud.deno.dev";
 const R2_PUB_1  = "https://pub-50fdd8fdb8474becb9427139f00206ad.r2.dev"; 
 const R2_PUB_2  = "https://pub-45c2fb2299a2438ea38ae56d17f3078e.r2.dev";
 
@@ -389,11 +389,11 @@ const MainScript = `
         // Link များ တည်ဆောက်ခြင်း
         const s1_dl    = domain + "/d/1/" + r2Key + "?dl=1";
         const s1_raw   = pub1 + "/" + r2Key;
-        const s1_proxy = proxy + "/" + pub1 + "/" + r2Key;
+        const s1_proxy = proxy + "/stream?url=" + pub1 + "/" + r2Key;
 
         const s2_dl    = domain + "/d/2/" + r2Key + "?dl=1";
         const s2_raw   = pub2 + "/" + r2Key;
-        const s2_proxy = proxy + "/" + pub2 + "/" + r2Key;
+        const s2_proxy = proxy + "/stream?url=" + pub2 + "/" + r2Key;
 
         // Textarea ထဲ ထည့်ခြင်း
         const text = 
